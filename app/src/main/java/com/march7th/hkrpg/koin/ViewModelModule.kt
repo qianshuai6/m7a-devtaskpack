@@ -9,6 +9,7 @@ import com.march7th.hkrpg.presentation.viewmodel.LogHistoryViewModel
 import com.march7th.hkrpg.presentation.viewmodel.NotificationSettingsViewModel
 import com.march7th.hkrpg.presentation.viewmodel.SettingsViewModel
 import com.march7th.hkrpg.presentation.viewmodel.TaskOverrideEditorViewModel
+import com.march7th.hkrpg.presentation.viewmodel.TaskPackDevViewModel
 import com.march7th.hkrpg.presentation.viewmodel.UpdateViewModel
 import com.march7th.hkrpg.schedule.ui.ScheduleEditViewModel
 import com.march7th.hkrpg.schedule.ui.ScheduleListViewModel
@@ -31,6 +32,7 @@ val viewModelModule = module {
     viewModelOf(::ScheduleTriggerLogViewModel)
     viewModelOf(::NotificationSettingsViewModel)
     viewModelOf(::TaskOverrideEditorViewModel)
+    viewModelOf(::TaskPackDevViewModel)
 }
 
 

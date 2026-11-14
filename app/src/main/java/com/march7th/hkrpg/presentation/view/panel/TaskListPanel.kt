@@ -118,7 +118,10 @@ fun TaskListPanel(
     val visibleNodes = remember(nodes) {
         nodes.filterNot { node ->
             val type = node.config.taskTypeOrNull()
-            type != null && TaskTypeInfo.entries.any { it.hidden && it.taskType == type }
+            // 开发者版一键长草只保留 启动游戏 / 自定义任务 / 关闭游戏。
+            // 仅 UI 过滤，底层枚举与配置类保留，旧草稿仍可反序列化。
+            !TaskTypeInfo.visibleInDevEdition(type) ||
+                TaskTypeInfo.entries.any { it.hidden && it.taskType == type }
         }
     }
     val enabledCount = remember(visibleNodes) { visibleNodes.count { it.enabled } }

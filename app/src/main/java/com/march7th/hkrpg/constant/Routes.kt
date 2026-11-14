@@ -19,4 +19,5 @@ object Routes {
     const val NOTIFICATION = "notification"
     const val WALLPAPER = "wallpaper"
     const val TASK_OVERRIDE_EDITOR = "task_override_editor"
+    const val TASK_PACK_DEVELOPER = "task_pack_developer"
 }

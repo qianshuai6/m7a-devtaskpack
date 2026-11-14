@@ -12,9 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
-
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,10 +40,12 @@ sealed class BottomNavTab(
         route = Routes.HOME, labelRes = R.string.bottom_nav_home, icon = Icons.Default.Home
     )
 
-    data object SCHEDULE : BottomNavTab(
-        route = Routes.SCHEDULE,
-        labelRes = R.string.bottom_nav_schedule,
-        icon = Icons.Default.DateRange
+    // 任务包开发是「动作 tab」：不占 pager 页，点击直接进独立全屏子路由。
+    // 独立页才能只在处理任务包开发时横屏，返回主界面自动恢复竖屏。
+    data object TASK_PACK_DEVELOPER : BottomNavTab(
+        route = Routes.TASK_PACK_DEVELOPER,
+        labelRes = R.string.bottom_nav_taskpack_developer,
+        icon = Icons.Default.Edit
     )
 
     data object SETTINGS : BottomNavTab(
@@ -54,7 +55,10 @@ sealed class BottomNavTab(
     )
 
     companion object {
-        val all = listOf(HOME, SCHEDULE, SETTINGS)
+        /** 底部显示的全部入口（含动作 tab）。 */
+        val all = listOf(HOME, TASK_PACK_DEVELOPER, SETTINGS)
+        /** 真正参与 HorizontalPager 的页面；动作 tab 不在其中。 */
+        val pagerTabs = listOf(HOME, SETTINGS)
     }
 }
 

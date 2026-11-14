@@ -41,6 +41,7 @@ import com.march7th.hkrpg.presentation.components.ResourceLoadingOverlay
 import com.march7th.hkrpg.presentation.components.clearFocusOnBlankTap
 import com.march7th.hkrpg.presentation.pip.LocalIsInPip
 import com.march7th.hkrpg.presentation.state.UiEffect
+import com.march7th.hkrpg.presentation.view.dev.TaskPackDeveloperScreen
 import com.march7th.hkrpg.presentation.view.notification.NotificationSettingsView
 import com.march7th.hkrpg.presentation.view.settings.AboutSettingsScreen
 import com.march7th.hkrpg.presentation.view.settings.DataSettingsScreen
@@ -77,8 +78,12 @@ import com.march7th.hkrpg.manager.PermissionManager
 import com.march7th.hkrpg.presentation.activation.ActivationStep
 import com.march7th.hkrpg.presentation.activation.ActivationWizard
 
-/** 主 Tab 路由集合（与 [BottomNavTab.all] 单一真源），用于判断是否处于主界面。 */
-private val MAIN_TAB_ROUTES: Set<String> = BottomNavTab.all.mapTo(HashSet()) { it.route }
+/**
+ * 主 Tab 路由集合（pager 页），用于判断是否处于主界面。
+ * 动作 tab（任务包开发）是独立全屏子页，不属于主界面：导航到它时主界面与底部导航隐藏，
+ * 开发者页全屏显示（横屏也只在该页生效）。
+ */
+private val MAIN_TAB_ROUTES: Set<String> = BottomNavTab.pagerTabs.mapTo(HashSet()) { it.route }
 
 @Composable
 fun AppNavigation(
@@ -232,8 +237,9 @@ fun AppNavigation(
                     popEnterTransition = { M7aMotion.pageEnter(forward = false, reduceMotion) },
                     popExitTransition = { M7aMotion.pageExit(forward = false, reduceMotion) },
                 ) {
-                    // 主 Tab 路由仅作占位，真实内容由 MainScreen 的 HorizontalPager 渲染
-                    BottomNavTab.all.forEach { tab -> composable(tab.route) {} }
+                    // 仅 pager 页作占位，真实内容由 MainScreen 的 HorizontalPager 渲染。
+                    // 动作 tab（任务包开发）是独立全屏子路由，下面单独注册，不能在这里重复注册。
+                    BottomNavTab.pagerTabs.forEach { tab -> composable(tab.route) {} }
 
                     composable(Routes.NOTIFICATION) {
                         NotificationSettingsView(navController = navController)
@@ -273,6 +279,9 @@ fun AppNavigation(
                     }
                     composable(Routes.TASK_OVERRIDE_EDITOR) {
                         TaskOverrideEditorView(navController = navController)
+                    }
+                    composable(Routes.TASK_PACK_DEVELOPER) {
+                        TaskPackDeveloperScreen(navController = navController)
                     }
                 }
             }

@@ -896,6 +896,12 @@ fun DataSettingsScreen(
                     description = stringResource(R.string.settings_taskpack_spec_desc),
                     onClick = { openTaskFileSpec(context) },
                 )
+                ListItemDivider()
+                SettingClickItem(
+                    title = stringResource(R.string.settings_taskpack_developer_title),
+                    description = stringResource(R.string.settings_taskpack_developer_desc),
+                    onClick = { navController.navigate(Routes.TASK_PACK_DEVELOPER) },
+                )
             }
         }
     }

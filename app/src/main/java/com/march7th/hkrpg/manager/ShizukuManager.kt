@@ -71,7 +71,20 @@ object ShizukuManager : RemoteAccessPermissionBackend {
     override suspend fun requestPermission(): Boolean {
         ensureStateObservation()
 
-        if (!isAvailable()) return false
+        // Shizuku Manager 通过 ShizukuProvider 异步回传 binder，冷启动或 Shizuku 刚启动时
+        // pingBinder() 会短暂为 false。旧实现在这里直接 return false，用户点「授权」
+        // 毫无反应，表现就是「识别不了 Shizuku 权限」。这里先等 binder 送达再判定。
+        if (!isAvailable()) {
+            val deadline = android.os.SystemClock.uptimeMillis() + 5_000L
+            while (android.os.SystemClock.uptimeMillis() < deadline && !isAvailable()) {
+                kotlinx.coroutines.delay(200L)
+            }
+        }
+        if (!isAvailable()) {
+            Timber.w("Shizuku binder not received within 5s")
+            notifyStateChanged()
+            return false
+        }
 
         if (Shizuku.isPreV11()) {
             notifyStateChanged()

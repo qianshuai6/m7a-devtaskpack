@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">March7thAssistant</string>
+    <string name="app_name">任务包开发者</string>
     <string name="volume_key_service_description">双击音量下键快速切换操作面板</string>
     <string name="accessibility_helper_service_description">无障碍辅助服务：双击音量下键快速切换操作面板</string>
 
@@ -494,7 +494,7 @@
     <string name="achievement_debug_clear_done">已删除所有成就记录</string>
 
     <!-- home: top bar & app title -->
-    <string name="home_app_title">March7thAssistant</string>
+    <string name="home_app_title">任务包开发者</string>
 
     <!-- home: screen info card -->
     <string name="home_screen_resolution">屏幕分辨率</string>
@@ -1089,6 +1089,7 @@
     <string name="bottom_nav_home">首页</string>
     <string name="bottom_nav_background_task">后台任务</string>
     <string name="bottom_nav_schedule">定时</string>
+    <string name="bottom_nav_taskpack_developer">任务包开发</string>
     <string name="bottom_nav_settings">设置</string>
     <string name="navigation_toast_switch_background_mode">当前是前台模式，请先切换到后台模式</string>
 
@@ -2823,6 +2824,8 @@ MAA 不会因为取消勾选此选项而提前在局内结束探索</string>
     <string name="settings_taskpack_count">共 %1$d 个</string>
     <string name="settings_taskpack_spec_title">任务文件开发规范</string>
     <string name="settings_taskpack_spec_desc">任务包结构、动作表与校验规则，在浏览器打开</string>
+    <string name="settings_taskpack_developer_title">任务包开发者</string>
+    <string name="settings_taskpack_developer_desc">实时录制、编辑现有任务包、AI 生成，并导出原版 .m7atask</string>
     <string name="settings_taskpack_installed">已导入任务包「%1$s」</string>
     <string name="settings_taskpack_updated">已更新任务包「%1$s」</string>
     <string name="settings_taskpack_deleted">已删除任务包「%1$s」</string>

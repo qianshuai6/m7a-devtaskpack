@@ -112,6 +112,22 @@ enum class TaskTypeInfo(
     );
 
     fun defaultName(context: Context): String = context.getString(nameRes)
+
+    /**
+     * 开发者版「一键长草」只保留这三项任务。
+     *
+     * 用户明确要求：启动游戏 / 自定义任务 / 关闭游戏。其余 6 项（邮件、清体力、
+     * 每日实训、无名勋礼、忘却之庭、兑换码）只在 **UI 层** 过滤掉 —— 枚举与配置类
+     * 全部保留，旧草稿 / 升级后的历史任务链仍能正常反序列化，不会因为删类而崩。
+     */
+    companion object {
+        val DEV_EDITION_VISIBLE: Set<String> = setOf(
+            START_UP.taskType, CUSTOM.taskType, CLOSE_DOWN.taskType,
+        )
+
+        fun visibleInDevEdition(taskType: String?): Boolean =
+            taskType != null && taskType in DEV_EDITION_VISIBLE
+    }
 }
 
 /**

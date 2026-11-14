@@ -93,7 +93,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
         @JvmStatic
         fun reapOrphanServices() {
             val myPid = Process.myPid()
-            val myName = "com.march7th.hkrpg:shizuku_service"
+            val myName = "${com.march7th.hkrpg.BuildConfig.APPLICATION_ID}:shizuku_service"
             val killed = mutableListOf<Int>()
             val skipped = mutableListOf<Int>()
 

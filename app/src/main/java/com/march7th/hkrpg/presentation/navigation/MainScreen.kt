@@ -24,7 +24,6 @@ import com.march7th.hkrpg.presentation.pip.LocalIsInPip
 import com.march7th.hkrpg.presentation.view.home.HomeConsoleView
 import com.march7th.hkrpg.presentation.view.settings.SettingsView
 import com.march7th.hkrpg.presentation.viewmodel.BackgroundTaskViewModel
-import com.march7th.hkrpg.schedule.ui.ScheduleListView
 import com.march7th.hkrpg.theme.LocalReduceMotion
 import com.march7th.hkrpg.theme.M7aMotion
 import kotlinx.coroutines.launch
@@ -41,7 +40,7 @@ fun MainScreen(
     fullscreen: Boolean = false,
     parallax: MutableFloatState,
 ) {
-    val pagerState = rememberPagerState(pageCount = { BottomNavTab.all.size })
+    val pagerState = rememberPagerState(pageCount = { BottomNavTab.pagerTabs.size })
     val scope = rememberCoroutineScope()
     val reduceMotion = LocalReduceMotion.current
     val chromeHidden = fullscreen || LocalIsInPip.current
@@ -50,7 +49,7 @@ fun MainScreen(
     // 不能只用 currentPageOffsetFraction：它在滑过中点时随 currentPage 进位翻符号，背景会瞬移。
     // 减弱动效由背景层统一忽略，这里照常上报。
     LaunchedEffect(pagerState) {
-        val lastIndex = (BottomNavTab.all.size - 1).coerceAtLeast(1)
+        val lastIndex = (BottomNavTab.pagerTabs.size - 1).coerceAtLeast(1)
         snapshotFlow { pagerState.currentPage + pagerState.currentPageOffsetFraction }
             .collect { position ->
                 parallax.floatValue = (position / lastIndex * 2f - 1f).coerceIn(-1f, 1f)
@@ -60,7 +59,7 @@ fun MainScreen(
     // targetPage：点击/滑动一旦确定目标即生效，停稳后等于 currentPage。
     // animateScrollToPage 内部走 MutatorMutex，连续调用时后者自动接管，无需手动取消。
     fun goToPage(index: Int, animate: Boolean = true) {
-        if (index !in BottomNavTab.all.indices || index == pagerState.targetPage) return
+        if (index !in BottomNavTab.pagerTabs.indices || index == pagerState.targetPage) return
         scope.launch {
             if (!animate) {
                 pagerState.scrollToPage(index)
@@ -82,10 +81,16 @@ fun MainScreen(
         goToPage(0)
     }
 
-    // 主 Tab 路由是空占位不能 navigate，只能先 pop 回主界面再滑 pager
+    // 主 Tab 路由是空占位不能 navigate，只能先 pop 回主界面再滑 pager。
+    // 动作 tab（任务包开发）是独立全屏子页，直接 navigate。
     fun surfaceToTab(tab: BottomNavTab, animate: Boolean = true) {
+        if (tab is BottomNavTab.TASK_PACK_DEVELOPER) {
+            navController.navigate(Routes.TASK_PACK_DEVELOPER)
+            return
+        }
         navController.popBackStack(Routes.HOME, false)
-        goToPage(BottomNavTab.all.indexOf(tab), animate)
+        val index = BottomNavTab.pagerTabs.indexOf(tab)
+        if (index >= 0) goToPage(index, animate)
     }
 
     // 定时任务触发时自动浮出首页（首页即后台任务控制台）
@@ -113,8 +118,14 @@ fun MainScreen(
             bottomBar = {
                 if (visible && !chromeHidden) {
                     AppBottomNavigation(
-                        currentRoute = BottomNavTab.all[pagerState.targetPage].route,
-                        onTabSelected = { tab -> goToPage(BottomNavTab.all.indexOf(tab)) },
+                        currentRoute = BottomNavTab.pagerTabs[pagerState.targetPage].route,
+                        onTabSelected = { tab ->
+                            if (tab is BottomNavTab.TASK_PACK_DEVELOPER) {
+                                navController.navigate(Routes.TASK_PACK_DEVELOPER)
+                            } else {
+                                goToPage(BottomNavTab.pagerTabs.indexOf(tab))
+                            }
+                        },
                     )
                 }
             },
@@ -131,17 +142,17 @@ fun MainScreen(
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize(),
-                    key = { BottomNavTab.all[it].route },
+                    key = { BottomNavTab.pagerTabs[it].route },
                     userScrollEnabled = visible && !chromeHidden,
                 ) { page ->
-                    when (BottomNavTab.all[page]) {
+                    when (BottomNavTab.pagerTabs[page]) {
                         // 首页 = 预检条 + 后台任务控制台（原两页合并）
                         BottomNavTab.HOME -> HomeConsoleView(
                             backgroundTaskViewModel = backgroundTaskViewModel,
                             isActivePage = visible && pagerState.targetPage == page,
                         )
-
-                        BottomNavTab.SCHEDULE -> ScheduleListView(navController = navController)
+                        // 动作 tab 不占 pager 页，点击时直接进独立全屏子路由
+                        BottomNavTab.TASK_PACK_DEVELOPER -> Unit
                         BottomNavTab.SETTINGS -> SettingsView(
                             navController = navController,
                         )

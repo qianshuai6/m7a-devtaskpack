@@ -62,12 +62,16 @@ object RemoteAccessCoordinator {
         if (current.isGranted(backend)) {
             return true
         }
-        if (!current.isAvailable(backend)) {
+        // Shizuku 的 binder 可能延迟送达；交给 ShizukuManager 内部等待并再次判定，
+        // 避免这里提前返回 false 导致「授权」按钮点了没反应。
+        if (!current.isAvailable(backend) && backend != RemoteBackend.SHIZUKU) {
             return false
         }
+        // Shizuku 的授权回调是权威结果；服务端权限状态刷新可能滞后，
+        // 旧实现在这里再查一次 isGranted，会把刚成功的授权误判为失败。
         val granted = backends.getValue(backend).requestPermission()
-        val refreshed = refresh()
-        return granted && refreshed.isGranted(backend)
+        refresh()
+        return granted
     }
 
     fun configuredBackend(): RemoteBackend {

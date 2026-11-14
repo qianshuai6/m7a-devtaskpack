@@ -32,6 +32,10 @@
 # ⚠️ 包名是 `core` 不是 `maa` —— 之前的规则写错成 `.maa.DriverClass`，
 # 等于什么都没保护到。
 -keep class com.march7th.hkrpg.core.DriverClass { *; }
+# native bridge 按 JNI 方法名查找启动入口，显式留名便于契约检查。
+-keepclassmembers class com.march7th.hkrpg.core.DriverClass {
+    public static boolean startApp(java.lang.String, int, boolean);
+}
 
 # JNA：方法名即 C 符号；嵌套 Callback 整包留
 -keep class com.march7th.hkrpg.maa.** { *; }
@@ -43,6 +47,16 @@
 
 # Shizuku / Root 按类名拉起
 -keep class com.march7th.hkrpg.remote.RemoteServiceImpl { <init>(); }
+# 任务包实时录制通过 AIDL 调用截图、预览与触摸注入；R8 不能按名字改掉这些入口。
+-keepclassmembers class com.march7th.hkrpg.remote.RemoteServiceImpl {
+    public java.lang.String captureFramePng(java.lang.String);
+    public android.os.ParcelFileDescriptor openCoreDebugFile(java.lang.String);
+    public void setMonitorSurface(android.view.Surface);
+    public void touchDown(int, int, int);
+    public void touchMove(int, int, int);
+    public void touchUp(int, int, int);
+    public void touchCancel();
+}
 -keep class com.march7th.hkrpg.remote.LogcatCaptureServiceImpl { <init>(); }
 -keep class com.march7th.hkrpg.root.RemoteServiceStarter {
     public static void main(java.lang.String[]);

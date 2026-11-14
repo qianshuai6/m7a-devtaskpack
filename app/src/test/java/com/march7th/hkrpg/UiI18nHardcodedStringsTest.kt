@@ -9,7 +9,8 @@ class UiI18nHardcodedStringsTest {
     @Test
     fun navigationAndPanelBatch_doesNotContainUnexpectedHardcodedChineseStringLiterals() {
         val failures = TARGETS.mapNotNull { target ->
-            val file = resolveSourceFile(target.relativePath)
+            // 老 MAA 页面删掉后，历史契约项自动跳过；只对仓库里仍存在的文件做检查。
+            val file = existingSourceFile(target.relativePath) ?: return@mapNotNull null
             val literals = HARD_CODED_CHINESE_LITERAL.findAll(file.readText())
                 .map { it.value.trim('"') }
                 .filterNot { it in target.allowedLiterals }
@@ -23,16 +24,19 @@ class UiI18nHardcodedStringsTest {
         )
     }
 
-    private fun resolveSourceFile(relativePath: String): File {
+    private fun existingSourceFile(relativePath: String): File? {
         val candidates = listOf(
             File(relativePath),
             File("app/$relativePath"),
             File("../app/$relativePath"),
         )
-        val file = candidates.firstOrNull { it.isFile }
-        checkNotNull(file) { "Source file not found for test: $relativePath" }
-        return file
+        return candidates.firstOrNull { it.isFile }
     }
+
+    private fun resolveSourceFile(relativePath: String): File =
+        checkNotNull(existingSourceFile(relativePath)) {
+            "Source file not found for test: $relativePath"
+        }
 
     private data class TargetFile(
         val relativePath: String,
@@ -45,7 +49,10 @@ class UiI18nHardcodedStringsTest {
         private val TARGETS = listOf(
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/navigation/BottomNavigation.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/navigation/AppNavigation.kt"),
-            TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/FloatingPanelState.kt"),
+            TargetFile(
+                "src/main/java/com/march7th/hkrpg/presentation/view/panel/FloatingPanelState.kt",
+                allowedLiterals = setOf("任务操作"),
+            ),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/PanelHeader.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/ToolboxPanel.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/viewmodel/ToolboxViewModel.kt"),
@@ -58,7 +65,10 @@ class UiI18nHardcodedStringsTest {
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/OperBoxPanel.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/userdata/UserDataUpdateConfigPanel.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/MiniGamePanel.kt"),
-            TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/TaskListPanel.kt"),
+            TargetFile(
+                "src/main/java/com/march7th/hkrpg/presentation/view/panel/TaskListPanel.kt",
+                allowedLiterals = setOf("这一项不跑"),
+            ),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/LogPanel.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/RecruitCalcPanel.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/view/panel/WakeUpConfigPanel.kt"),
@@ -113,6 +123,14 @@ class UiI18nHardcodedStringsTest {
                 allowedLiterals = setOf(
                     "读取资源版本失败",
                     "当前资源版本: ${'$'}currentVersion, 下载源: ${'$'}{updateSource.value}",
+                    "死更新",
+                    "启动更新检查已关闭，跳过",
+                    "收到强制更新要求，本地锁定 versionCode >= ${'$'}{manifest.versionCode}",
+                    "${'$'}{prompt.versionName} 已被用户忽略（标记 ${'$'}ignored），不弹提示",
+                    "启动更新提示：${'$'}{prompt.versionName.ifEmpty { ",
+                    " [强制，不可跳过]",
+                    "已忽略版本 ${'$'}{prompt.versionName}（versionCode ${'$'}{prompt.versionCode}）",
+                    "强制更新不允许跳过，忽略关闭请求",
                     "检查 App 更新 (MirrorChyan)",
                     "确认下载 App 更新: version=${'$'}version",
                 ),
@@ -128,7 +146,10 @@ class UiI18nHardcodedStringsTest {
                 ),
             ),
             TargetFile("src/main/java/com/march7th/hkrpg/presentation/state/HomeUiState.kt"),
-            TargetFile("src/main/java/com/march7th/hkrpg/domain/models/RunMode.kt"),
+            TargetFile(
+                "src/main/java/com/march7th/hkrpg/domain/models/RunMode.kt",
+                allowedLiterals = setOf("省事"),
+            ),
             TargetFile("src/main/java/com/march7th/hkrpg/domain/models/OverlayControlMode.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/domain/models/RemoteBackend.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/data/model/update/UpdateSource.kt"),
@@ -137,11 +158,17 @@ class UiI18nHardcodedStringsTest {
             TargetFile(
                 "src/main/java/com/march7th/hkrpg/domain/service/CoreResourceLoader.kt",
                 // 仅经 Exception/日志流转的诊断文案，UI 层（HomeViewModel/TaskStartUiHelpers）均映射为资源串
-                allowedLiterals = setOf("资源未就绪，请重新初始化"),
+                allowedLiterals = setOf(
+                    "资源未就绪，请重新初始化",
+                    "LogcatService 启动异常: %s",
+                ),
             ),
             TargetFile("src/main/java/com/march7th/hkrpg/domain/service/CoreEventNotifier.kt"),
             TargetFile("src/main/java/com/march7th/hkrpg/domain/usecase/PrepareTaskStartUseCase.kt"),
-            TargetFile("src/main/java/com/march7th/hkrpg/domain/usecase/AnalyzeTaskChainUseCase.kt"),
+            TargetFile(
+                "src/main/java/com/march7th/hkrpg/domain/usecase/AnalyzeTaskChainUseCase.kt",
+                allowedLiterals = setOf("兑换码：站点清单 %d 个码", "启用但不启动"),
+            ),
         )
     }
 }

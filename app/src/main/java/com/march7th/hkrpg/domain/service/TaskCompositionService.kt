@@ -104,6 +104,32 @@ class TaskCompositionService(
     val displayResolution: StateFlow<DefaultDisplayConfig.Resolution> =
         _displayResolution.asStateFlow()
 
+    /**
+     * 开发者版专用：把虚拟屏分辨率切成**真机物理分辨率**，根治长屏设备上的画面拉伸。
+     *
+     * 原实现固定 1920×1080（16:9），而全面屏手机横屏多为 2.2:1；ROM 给虚拟屏上的
+     * 游戏布局时参考物理屏比例，导致 16:9 内容被横向拉伸（见 VirtualDisplayManager 注释）。
+     * 这里复用已有的 `RemoteService.setVirtualDisplayResolution`，不改 AIDL、不改执行器；
+     * 同时同步 [displayResolution]，保证触摸注入的像素换算与新分辨率一致。
+     *
+     * 正式跑任务时 [resolveAndSetResolution] 会重新设回 1080p，因此不影响原执行流程。
+     */
+    fun applyDeveloperResolution(width: Int, height: Int, dpi: Int) {
+        val r = DefaultDisplayConfig.Resolution(width, height, dpi)
+        _displayResolution.value = r
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                RemoteServiceManager.getInstanceOrNull()?.setVirtualDisplayResolution(width, height, dpi)
+            }
+        }
+        Timber.i("Developer preview resolution applied: %dx%d@%d", width, height, dpi)
+    }
+
+    /** 开发者页可切回原 1080p 基准做模板对照。 */
+    fun restoreDefaultResolution() {
+        applyDeveloperResolution(defaultResolution.width, defaultResolution.height, defaultResolution.dpi)
+    }
+
     override fun currentRunState(): TaskExecutionState = _state.value
 
     override fun reportRunState(state: TaskExecutionState) {

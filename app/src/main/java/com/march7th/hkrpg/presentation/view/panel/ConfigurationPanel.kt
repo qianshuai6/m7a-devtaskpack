@@ -193,7 +193,14 @@ internal fun TaskGalleryView(
             // 自定义任务单独处理：**一个已安装的任务包占一格**。
             // 这样加出来的卡片天生绑定那个包，标题就是包名，不用先加一张
             // 空白卡再进去选 —— 装了几个包，链里就能并排放几个板块。
-            items(TaskTypeInfo.entries.filter { !it.hidden && it != TaskTypeInfo.CUSTOM }) { typeInfo ->
+            // 开发者版一键长草只保留 启动游戏 / 关闭游戏（自定义任务走下面按包单独一格）。
+            // 仅 UI 过滤，其余任务类型枚举仍在，旧配置不会反序列化失败。
+            items(
+                TaskTypeInfo.entries.filter {
+                    !it.hidden && it != TaskTypeInfo.CUSTOM &&
+                        TaskTypeInfo.visibleInDevEdition(it.taskType)
+                }
+            ) { typeInfo ->
                 TaskGalleryCell(taskTypeLabel(typeInfo)) { onAddNode(typeInfo) }
             }
             if (customPacks.isEmpty()) {
