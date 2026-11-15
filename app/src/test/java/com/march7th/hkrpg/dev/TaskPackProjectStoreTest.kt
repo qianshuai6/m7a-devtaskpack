@@ -74,4 +74,21 @@ class TaskPackProjectStoreTest {
         java.io.File(root, "taskpack-projects/${saved.fileId}.m7atask").delete()
         assertTrue(store.list().isEmpty())
     }
+
+    @Test
+    fun legacyProjectsAreCopiedIntoNewDirectory() {
+        val legacy = Files.createTempDirectory("taskpack-store-legacy").toFile()
+        val old = TaskPackProjectStore(legacy, appVersionCode)
+        val saved = old.save("", project("旧工程", "1.2-4.7"))
+
+        // 新版本把工程目录挪到外部私有目录，老工程要跟过去，不能"升级完就找不到"。
+        val fresh = Files.createTempDirectory("taskpack-store-fresh").toFile()
+        val store = TaskPackProjectStore(fresh, appVersionCode, legacyRootDir = legacy)
+        assertEquals(1, store.list().size)
+        assertEquals(saved.fileId, store.list().single().fileId)
+        assertNotNull(store.load(saved.fileId))
+        // 旧文件保留原地，迁移只做复制。
+        assertTrue(java.io.File(legacy, "taskpack-projects/${saved.fileId}.m7atask").isFile)
+        assertTrue(store.directoryPath.contains("taskpack-projects"))
+    }
 }

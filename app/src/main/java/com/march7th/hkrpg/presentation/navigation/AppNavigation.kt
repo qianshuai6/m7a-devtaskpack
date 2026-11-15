@@ -41,6 +41,7 @@ import com.march7th.hkrpg.presentation.components.ResourceLoadingOverlay
 import com.march7th.hkrpg.presentation.components.clearFocusOnBlankTap
 import com.march7th.hkrpg.presentation.pip.LocalIsInPip
 import com.march7th.hkrpg.presentation.state.UiEffect
+import com.march7th.hkrpg.presentation.view.dev.TaskPackAiScreen
 import com.march7th.hkrpg.presentation.view.dev.TaskPackDeveloperScreen
 import com.march7th.hkrpg.presentation.view.notification.NotificationSettingsView
 import com.march7th.hkrpg.presentation.view.settings.AboutSettingsScreen
@@ -282,6 +283,10 @@ fun AppNavigation(
                     }
                     composable(Routes.TASK_PACK_DEVELOPER) {
                         TaskPackDeveloperScreen(navController = navController)
+                    }
+                    // AI 写包单独一页（竖屏）：开发者页是横屏，写包要的是聊天的竖屏版式。
+                    composable(Routes.TASK_PACK_AI) {
+                        TaskPackAiScreen(navController = navController)
                     }
                 }
             }

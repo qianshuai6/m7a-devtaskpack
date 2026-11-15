@@ -30,17 +30,20 @@ data class TaskPackProjectSummary(
  * 用原版 `.m7atask` 而不是自定义 JSON，好处是「切到哪个工程」都能直接拿去导出/分享，
  * 不依赖 App 私有格式；`assets/` 里的模板图也原样跟着工程走。
  *
- * 目录结构：
+ * 目录结构（放在外部私有目录，文件管理器 / 数据线都能直接看到）：
  * ```
- * files/taskpack-dev/taskpack-projects/
+ * Android/data/com.march7th.hkrpg.taskpack/files/Maa/taskpack-projects/
  *   index.json          概览索引
  *   proj-1730000000.m7atask
  *   proj-1730001234.m7atask
  * ```
+ *
+ * 早期版本存在内部 `files/taskpack-dev/` 下，构造时会把旧工程复制过来（不删原件）。
  */
 class TaskPackProjectStore(
     rootDir: File,
     private val appVersionCode: Int,
+    legacyRootDir: File? = null,
 ) {
     private val dir = File(rootDir, "taskpack-projects")
     private val indexFile = File(dir, "index.json")
@@ -50,6 +53,30 @@ class TaskPackProjectStore(
         encodeDefaults = true
     }
     private val sequence = AtomicLong(System.currentTimeMillis())
+
+    /** 工程文件实际所在目录，UI 里直接显示，方便用户去文件管理器里找。 */
+    val directoryPath: String get() = dir.absolutePath
+
+    init {
+        // 只在「新目录还没有索引」时迁移，避免每次启动都扫一遍旧目录。
+        if (legacyRootDir != null && legacyRootDir.absolutePath != rootDir.absolutePath) {
+            runCatching {
+                val old = File(legacyRootDir, "taskpack-projects")
+                if (old.isDirectory && !indexFile.isFile) migrateLegacy(old)
+            }
+        }
+    }
+
+    /** 把旧目录里的工程搬一份过来；同名的以新目录为准，旧文件保留不动。 */
+    private fun migrateLegacy(old: File) {
+        if (!old.isDirectory) return
+        ensureDir()
+        val moved = old.listFiles()?.filter { it.isFile } ?: return
+        moved.forEach { src ->
+            val dest = File(dir, src.name)
+            if (!dest.exists()) runCatching { src.copyTo(dest, overwrite = false) }
+        }
+    }
 
     private fun ensureDir() {
         if (!dir.isDirectory) dir.mkdirs()

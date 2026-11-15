@@ -18,13 +18,22 @@ import com.march7th.hkrpg.data.model.PackStep
 import com.march7th.hkrpg.data.resource.CustomTaskPackStore
 import com.march7th.hkrpg.data.resource.CustomTaskPackValidator
 import com.march7th.hkrpg.data.resource.TaskPackInstallResult
+import com.march7th.hkrpg.dev.AiChat
+import com.march7th.hkrpg.dev.AiChatKind
+import com.march7th.hkrpg.dev.AiChatMessage
+import com.march7th.hkrpg.dev.AiRecordedAction
+import com.march7th.hkrpg.dev.AiRecording
+import com.march7th.hkrpg.dev.AiTemplateHit
+import com.march7th.hkrpg.dev.TaskPackAiAction
 import com.march7th.hkrpg.dev.TaskPackAiClickResult
 import com.march7th.hkrpg.dev.TaskPackAiClient
 import com.march7th.hkrpg.dev.TaskPackAiConfig
 import com.march7th.hkrpg.dev.TaskPackArchive
 import com.march7th.hkrpg.dev.TaskPackDelay
+import com.march7th.hkrpg.dev.TaskPackIssueRepair
 import com.march7th.hkrpg.dev.TaskPackDisplay
 import com.march7th.hkrpg.dev.TaskPackDraftStore
+import com.march7th.hkrpg.dev.TaskPackIconMatcher
 import com.march7th.hkrpg.dev.TaskPackProjectStore
 import com.march7th.hkrpg.dev.TaskPackProjectSummary
 import com.march7th.hkrpg.dev.DelayField
@@ -40,9 +49,11 @@ import com.march7th.hkrpg.dev.TaskPackNaming
 import com.march7th.hkrpg.dev.TaskPackOcr
 import com.march7th.hkrpg.dev.TaskPackProject
 import com.march7th.hkrpg.dev.TaskPackSpec
+import com.march7th.hkrpg.dev.TaskPackSpecDigest
 import com.march7th.hkrpg.dev.TaskPackSpecResult
 import com.march7th.hkrpg.dev.TaskPackTemplateLibrary
 import com.march7th.hkrpg.dev.PackTemplateEntry
+import com.march7th.hkrpg.dev.SilentGestureAnalyzer
 import com.march7th.hkrpg.dev.StepTemplate
 import com.march7th.hkrpg.dev.normCoordinate
 import com.march7th.hkrpg.domain.service.TaskCompositionService
@@ -51,6 +62,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
@@ -66,6 +78,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import android.content.pm.PackageManager
 import com.march7th.hkrpg.domain.models.RemoteBackend
@@ -123,6 +136,10 @@ data class SilentAction(
     /** 动作发生那一刻的缩略截图（JPEG），超出上限时为空。 */
     val thumb: ByteArray? = null,
     val included: Boolean = true,
+    /** [SilentGestureAnalyzer.KIND_JOYSTICK] 表示这条是摇杆推杆（op 仍是 swipe）。 */
+    val kind: String = "",
+    /** 轨迹净位移（归一化）：面板里显示「推杆 6%」，也用于判断是不是摇杆。 */
+    val travel: Double = 0.0,
 )
 
 /** 拉框 OCR 文字：框选区域后识别出的候选文字，等用户挑一个动作再落地成步骤。 */
@@ -190,6 +207,8 @@ data class TaskPackDevState(
     val silentActions: List<SilentAction> = emptyList(),
     /** 停止录制后弹出的确认面板。 */
     val silentReviewVisible: Boolean = false,
+    /** 连续同向滑动是否合并成一条（手滑一次列表、微抬再补一下时最有用）。 */
+    val silentMergeSwipes: Boolean = true,
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val recording: Boolean = false,
@@ -281,8 +300,35 @@ data class TaskPackDevState(
     // ---- AI 边生成边自动点击 ----
     val aiAutoClick: Boolean = true,
     val aiAutoClickCount: Int = 0,
-    /** 用户本轮手动点过的坐标；写入任务包的坐标仍只能来自用户，AI 自动点击仅用于推进界面。 */
+    /** 点击成功后是否直接录成步骤（「玩家不插手」模式靠它把点击留成任务包）。 */
+    val aiAutoRecord: Boolean = true,
+    /** 本轮 AI 自动录进任务包的步骤数。 */
+    val aiRecordedSteps: Int = 0,
+    /** 本轮 token 用量摘要（含缓存命中率），用于确认前缀缓存是否真的生效。 */
+    val aiUsageText: String = "",
+    /** 用户本轮手动点过、或 AI 按文字点击命中的坐标；仅作参考与去重用。 */
     val aiProvidedPoints: Set<Pair<Double, Double>> = emptySet(),
+    // ==================== AI 对话记录 / 主动观察 / 静默录制 ====================
+    /** 生成过程按聊天记录展示：目标 → 思考 → 说明 → 动作 → 提问 → 结果。 */
+    val aiChat: List<AiChatMessage> = emptyList(),
+    /** 对话输入框：生成中作为补充说明，等待提问时作为回答。 */
+    val aiChatInput: String = "",
+    /** 模型提问、等待用户回答的问题；非空时输入框变成「回答」。 */
+    val aiPendingQuestion: String? = null,
+    /** 画面变化时是否主动把新 OCR 文字推给 AI。 */
+    val aiWatchScreen: Boolean = true,
+    /** 用户自己点游戏时，是否把「点了什么」也告诉 AI。 */
+    val aiAcceptUserGesture: Boolean = true,
+    /** 最近一次主动观察到的画面文字（界面上显示，便于确认观察链路是否工作）。 */
+    val aiLiveObservation: String = "",
+    /** AI 生成期间的静默录制：录制点击、OCR 候选与模板匹配候选。 */
+    val aiRecording: Boolean = false,
+    val aiRecorded: List<AiRecordedAction> = emptyList(),
+    /** 后台正在补 OCR / 模板匹配的条数。 */
+    val aiRecordBusy: Int = 0,
+    /** 本轮模型提问 / 主动观察次数。 */
+    val aiAsksUsed: Int = 0,
+    val aiObservationsUsed: Int = 0,
     val ocrDiagnosis: String = "",
     val environmentInfo: String = "",
     val shizukuRequesting: Boolean = false,
@@ -301,19 +347,50 @@ class TaskPackDevViewModel(
     private val ocr = TaskPackOcr(app)
     private val aiClient = TaskPackAiClient(httpClient)
     private val aiPrefs = app.getSharedPreferences("taskpack_dev_ai", Context.MODE_PRIVATE)
+
+    /** 录制相关偏好（与 AI 配置分开，免得清 AI 设置时把录制习惯一起清掉）。 */
+    private val recordPrefs = app.getSharedPreferences("taskpack_dev_record", Context.MODE_PRIVATE)
     private val draftStore = TaskPackDraftStore(
         File(app.filesDir, "taskpack-dev"), BuildConfig.VERSION_CODE,
     )
+
+    /**
+     * 工程文件的落盘根目录。
+     *
+     * 放在外部私有目录 `Android/data/<包名>/files/Maa/` 下：不用申请存储权限，
+     * 但文件管理器和数据线都能直接看到、拷走，和主项目 MAA 的目录习惯一致。
+     * 外部存储不可用（极少数情况）时退回内部 `files/taskpack-dev/`。
+     */
+    private val projectRootDir: File = runCatching {
+        app.getExternalFilesDir(null)?.let { File(it, "Maa") }
+    }.getOrNull() ?: File(app.filesDir, "taskpack-dev")
+
     /** 多工程存档：一个工程一个 .m7atask，可在列表里快速切换。 */
     private val projectStore = TaskPackProjectStore(
-        File(app.filesDir, "taskpack-dev"), BuildConfig.VERSION_CODE,
+        projectRootDir,
+        BuildConfig.VERSION_CODE,
+        legacyRootDir = File(app.filesDir, "taskpack-dev"),
     )
+
+    /** 工程目录，给工程面板显示「文件存在哪」。 */
+    fun projectDirectory(): String = projectStore.directoryPath
     private var surface: Surface? = null
     private var lastActionAt = 0L
     private var assetSequence = 0
     private var shizukuAutoRequested = false
     /** 当前 AI 生成协程，供「打断生成」取消；同时由客户端取消底层 HTTP 请求。 */
     private var aiJob: Job? = null
+    /** 画面监视协程：画面一变就把新 OCR 文字推给模型。 */
+    private var watchJob: Job? = null
+    /** 模型提问时挂起的等待：complete 后生成继续，null 表示跳过。 */
+    private var questionDeferred: CompletableDeferred<String?>? = null
+    /** 待送给模型的主动观察（画面变化 / 用户手动点击），由客户端每轮取空。 */
+    private val observationQueue = java.util.ArrayDeque<String>()
+    private val observationLock = Any()
+    /** App 自己刚点过的时间点：这之后的画面变化是它造成的，不再重复上报。 */
+    @Volatile
+    private var lastSelfActionAt = 0L
+    private val iconMatcher = TaskPackIconMatcher(app) { _state.value.iconTemplates }
     /** 规范正文缓存：同一组链接只拉一次，避免每次生成都联网；链接变化或手动刷新时失效。 */
     @Volatile
     private var cachedSpec: TaskPackSpecResult? = null
@@ -337,8 +414,14 @@ class TaskPackDevViewModel(
             // AI 自动点击默认开启：这是「AI 生成时能推进游戏界面」的主开关，
             // 之前默认关闭导致真机上完全不触发。写入包内的坐标仍只由用户提供。
             aiAutoClick = aiPrefs.getBoolean("autoClick", true),
+            aiAutoRecord = aiPrefs.getBoolean("autoRecord", true),
             aiTemplateLookup = aiPrefs.getBoolean("templateLookup", true),
+            // 画面一变就主动把新 OCR 推给模型 / 用户自己点游戏也告诉模型：两者默认开启，
+            // 这正是「模型看不见屏幕」最有效的补偿。
+            aiWatchScreen = aiPrefs.getBoolean("watchScreen", true),
+            aiAcceptUserGesture = aiPrefs.getBoolean("userGesture", true),
             aiSpecUrls = loadSpecUrls(),
+            silentMergeSwipes = recordPrefs.getBoolean("mergeSwipes", true),
         )
     )
     val state: StateFlow<TaskPackDevState> = _state.asStateFlow()
@@ -878,6 +961,26 @@ class TaskPackDevViewModel(
         aiPrefs.edit().putBoolean("autoClick", enabled).apply()
     }
 
+    fun setAiAutoRecord(enabled: Boolean) {
+        _state.update { it.copy(aiAutoRecord = enabled) }
+        aiPrefs.edit().putBoolean("autoRecord", enabled).apply()
+    }
+
+    /** 清掉本轮 AI 边点边录写进来的步骤（点错界面时用）。 */
+    fun clearAiRecordedSteps() {
+        val recorded = _state.value.aiRecordedSteps
+        if (recorded <= 0) return
+        mutateSteps { current ->
+            var steps = current.steps
+            repeat(recorded) {
+                val idx = steps.indexOfLast { it.note?.contains("（AI 边点边录）") == true }
+                if (idx >= 0) steps = steps.toMutableList().also { it.removeAt(idx) }
+            }
+            current.copy(steps = steps, selectedStepIndex = null)
+        }
+        _state.update { it.copy(aiRecordedSteps = 0) }
+    }
+
     fun clearAiProvidedPoints() = _state.update { it.copy(aiProvidedPoints = emptySet()) }
 
     /**
@@ -893,6 +996,7 @@ class TaskPackDevViewModel(
         moved: Boolean,
         durationMs: Long,
         actionAt: Long,
+        track: List<Pair<Double, Double>> = emptyList(),
     ) {
         if (!_state.value.recording) {
             frame?.recycle()
@@ -904,6 +1008,7 @@ class TaskPackDevViewModel(
             recordSilentGesture(
                 startX = startX, startY = startY, endX = endX, endY = endY,
                 moved = moved, durationMs = durationMs, actionAt = actionAt,
+                track = track,
             )
             return
         }
@@ -987,32 +1092,79 @@ class TaskPackDevViewModel(
         moved: Boolean,
         durationMs: Long,
         actionAt: Long,
+        track: List<Pair<Double, Double>> = emptyList(),
     ) {
         val sx = normCoordinate(startX)
         val sy = normCoordinate(startY)
         val ex = normCoordinate(endX)
         val ey = normCoordinate(endY)
-        val op = when {
-            moved -> "swipe"
-            durationMs >= LONG_PRESS_MS -> "longPress"
-            else -> "tap"
+        // 有轨迹就按轨迹判定：摇杆（推出去又收回）不能被录成零长度滑动，
+        // 滑动的终点也不能跟着抬起前的回拉走。没有轨迹（老路径 / 单点）退回起终点判断。
+        val gesture = if (track.size >= 2) {
+            SilentGestureAnalyzer.analyze(track, durationMs)
+        } else {
+            SilentGestureAnalyzer.analyze(
+                listOf(sx to sy, ex to ey),
+                durationMs,
+            )
         }
+        val op = gesture.op
         if (_state.value.silentActions.size >= MAX_SILENT_ACTIONS) return
+
+        // 连续同向滑动合并：手滑一次列表、微抬再补一下会记成两条，合起来才是用户想滑的距离。
+        if (_state.value.silentMergeSwipes && op == "swipe") {
+            val last = _state.value.silentActions.lastOrNull()
+            if (last != null && last.op == "swipe") {
+                val prevGesture = SilentGestureAnalyzer.Gesture(
+                    op = last.op,
+                    kind = last.kind,
+                    x = last.x,
+                    y = last.y,
+                    toX = last.toX,
+                    toY = last.toY,
+                    durationMs = last.durationMs,
+                    travel = last.travel,
+                )
+                val gap = actionAt - (last.startedAt + last.durationMs)
+                val merged = SilentGestureAnalyzer.mergeSwipes(prevGesture, gesture, gap)
+                if (merged != null) {
+                    _state.update { current ->
+                        current.copy(
+                            silentActions = current.silentActions.map {
+                                if (it.seq == last.seq) {
+                                    it.copy(
+                                        toX = merged.toX,
+                                        toY = merged.toY,
+                                        durationMs = merged.durationMs,
+                                        travel = merged.travel,
+                                    )
+                                } else {
+                                    it
+                                }
+                            },
+                        )
+                    }
+                    return
+                }
+            }
+        }
+
         // 同一次触摸可能回调多次（按下 / 抬起 / 长按判定），坐标几乎不变的短时间重复上报
         // 只更新那一条的时长与类型，避免确认面板里出现互相冲突的两条。
         val recent = _state.value.silentActions.lastOrNull()
         val duplicated = recent != null && recent.op != "swipe" && op != "swipe" &&
             actionAt - recent.startedAt in 0..SILENT_MERGE_MS &&
-            kotlin.math.abs(recent.x - sx) < SILENT_SAME_SPOT &&
-            kotlin.math.abs(recent.y - sy) < SILENT_SAME_SPOT
+            kotlin.math.abs(recent.x - gesture.x) < SILENT_SAME_SPOT &&
+            kotlin.math.abs(recent.y - gesture.y) < SILENT_SAME_SPOT
         if (duplicated && recent != null) {
             _state.update { current ->
                 current.copy(
                     silentActions = current.silentActions.map {
                         if (it.seq == recent.seq) {
                             it.copy(
-                                op = if (durationMs > it.durationMs) op else it.op,
-                                durationMs = maxOf(it.durationMs, durationMs.coerceIn(0, 10_000)),
+                                op = if (gesture.durationMs > it.durationMs) op else it.op,
+                                durationMs = maxOf(it.durationMs, gesture.durationMs.coerceIn(0, 10_000)),
+                                kind = if (gesture.kind.isNotBlank()) gesture.kind else it.kind,
                             )
                         } else {
                             it
@@ -1026,8 +1178,13 @@ class TaskPackDevViewModel(
         _state.update {
             it.copy(
                 silentActions = it.silentActions + SilentAction(
-                    seq = seq, op = op, x = sx, y = sy, toX = ex, toY = ey,
-                    durationMs = durationMs.coerceIn(0, 10_000), startedAt = actionAt,
+                    seq = seq, op = op,
+                    x = gesture.x, y = gesture.y,
+                    toX = gesture.toX, toY = gesture.toY,
+                    durationMs = gesture.durationMs.coerceIn(0, 10_000),
+                    startedAt = actionAt,
+                    kind = gesture.kind,
+                    travel = gesture.travel,
                 ),
             )
         }
@@ -1044,7 +1201,7 @@ class TaskPackDevViewModel(
             val text = if (op == "swipe") {
                 ""
             } else {
-                runCatching { ocr.textAt(frame, sx, sy) }.getOrNull().orEmpty()
+                runCatching { ocr.textAt(frame, gesture.x, gesture.y) }.getOrNull().orEmpty()
             }
             frame.recycle()
             _state.update { current ->
@@ -1055,6 +1212,12 @@ class TaskPackDevViewModel(
                 )
             }
         }
+    }
+
+    /** 连续同向滑动是否合并（默认开）。关掉后每一次抬手都单独生成一条 swipe。 */
+    fun setSilentMergeSwipes(enabled: Boolean) {
+        _state.update { it.copy(silentMergeSwipes = enabled) }
+        recordPrefs.edit().putBoolean("mergeSwipes", enabled).apply()
     }
 
     fun setSilentIncluded(seq: Int, included: Boolean) = _state.update { current ->
@@ -1078,7 +1241,8 @@ class TaskPackDevViewModel(
     fun setSilentOp(seq: Int, op: String) = _state.update { current ->
         current.copy(
             silentActions = current.silentActions.map {
-                if (it.seq == seq) it.copy(op = op) else it
+                // 手动改类型后，摇杆标记就不成立了（用户可能把它当普通滑动/长按用）。
+                if (it.seq == seq) it.copy(op = op, kind = "") else it
             },
         )
     }
@@ -1151,9 +1315,17 @@ class TaskPackDevViewModel(
                         op = "swipe",
                         fromX = action.x, fromY = action.y,
                         toX = action.toX, toY = action.toY,
+                        // 录出来的时长本身就带下限（240ms），这里只守住校验上限。
                         durationMs = action.durationMs.coerceIn(80, 10_000),
-                        note = "静默录制滑动 (${coord(action.x)}, ${coord(action.y)}) → " +
-                            "(${coord(action.toX)}, ${coord(action.toY)})",
+                        note = if (action.kind == SilentGestureAnalyzer.KIND_JOYSTICK) {
+                            "静默录制摇杆：按住 ${action.durationMs}ms，推杆方向 " +
+                                "(${coord(action.x)}, ${coord(action.y)}) → " +
+                                "(${coord(action.toX)}, ${coord(action.toY)})"
+                        } else {
+                            "静默录制滑动 (${coord(action.x)}, ${coord(action.y)}) → " +
+                                "(${coord(action.toX)}, ${coord(action.toY)})" +
+                                " · ${action.durationMs}ms"
+                        },
                     )
                     "longPress" -> PackStep(
                         op = "longPress",
@@ -1661,7 +1833,7 @@ class TaskPackDevViewModel(
 
     /**
      * 非录制状态点画面时登记坐标。这些坐标（以及当前工程里已录制的坐标）就是
-     * 「用户提供的坐标」，AI 自动点击只能引用它们，绝不自行生成坐标。
+     * 参考坐标清单：AI 自动点击与写包时可以优先复用，但不强制。
      */
     fun noteIdleTouch(nx: Double, ny: Double) {
         val point = normCoordinate(nx) to normCoordinate(ny)
@@ -2046,6 +2218,39 @@ class TaskPackDevViewModel(
         )
     }
 
+    /**
+     * 校验导出页的「一键修复」。
+     *
+     * 只动能确定意图的写法问题：表达式里的 `{变量}` 去掉花括号、越界数值收回区间、
+     * `compare` / `color` 同义写法统一。文字的取值、坐标与模板引用一律不碰 ——
+     * 修不了的继续按原文列在下面，交给用户决定。
+     */
+    fun repairIssues() {
+        if (_state.value.exporting) return
+        runCatching {
+            val before = validateCurrent()
+            val result = TaskPackIssueRepair.repair(currentPack())
+            if (result.fixes.isEmpty()) {
+                showMessage("没有可自动修复的问题（当前 ${before.size} 项需手动处理）")
+                return
+            }
+            mutateSteps { it.copy(steps = result.pack.steps) }
+            val after = validateCurrent()
+            showMessage(
+                buildString {
+                    append("已修复：")
+                    append(result.fixes.joinToString("、"))
+                    append("。校验问题 ${before.size} → ${after.size}")
+                    if (after.isNotEmpty()) append("，剩余需手动改")
+                },
+            )
+        }.onFailure {
+            // 修复本身出错时只提示，不让整屏跟着挂掉（原件还在，可以退回手动改）
+            Timber.w(it, "repair issues failed")
+            showMessage("自动修复失败：${it.message ?: it.javaClass.simpleName}，请手动修改")
+        }
+    }
+
     fun previewJson(): String = TaskPackProject.manifestJson(currentPack())
     fun suggestedFileName(): String = TaskPackNaming.archiveName(
         _state.value.id.ifBlank { "taskpack" },
@@ -2263,11 +2468,13 @@ class TaskPackDevViewModel(
         .joinToString("\n")
         .ifBlank { "（暂无：请先在画面上取点或用实时录制产生坐标）" }
 
+    /**
+     * 数值坐标点击：坐标由 App 归一化与裁剪，模型给 0~1 或像素都能用。
+     *
+     * 顺带把落点附近的 OCR 文字带回去，模型据此知道「点到的是什么」，
+     * 下一轮就不容易重复点同一个位置。
+     */
     private suspend fun performAiClick(nx: Double, ny: Double): TaskPackAiClickResult {
-        // AI 生成过程中允许按画面自行给 0~1 坐标推进界面（用户已确认）。
-        // 这些坐标**只用于推进游戏、不写入任务包**：包内坐标仍只来自用户录制或明确提供。
-        val x = normCoordinate(nx)
-        val y = normCoordinate(ny)
         val serviceReady = RemoteServiceManager.getInstanceOrNull() != null
         if (!serviceReady) {
             return TaskPackAiClickResult(
@@ -2276,9 +2483,19 @@ class TaskPackDevViewModel(
                     "请到「环境」页确认授权后重试；此时请仅依据已有 OCR 文字输出最终 task.json。",
             )
         }
+        val before = captureFrame()
+        val w = before?.width?.toDouble()?.takeIf { it > 0 } ?: 1920.0
+        val h = before?.height?.toDouble()?.takeIf { it > 0 } ?: 1080.0
+        // 像素坐标（常见 1920×1080）先除以画面尺寸；0~1 的归一化值原样使用。
+        val pixelMode = nx > 1.5 || ny > 1.5
+        val x = normCoordinate(if (pixelMode) nx / w else nx)
+        val y = normCoordinate(if (pixelMode) ny / h else ny)
+        val hitText = before?.let { ocr.textAt(it, x, y) }
+        before?.recycle()
         touchDown(x, y)
         delay(60)
         touchUp(x, y)
+        lastSelfActionAt = System.currentTimeMillis()
         delay(900)
         val frame = captureFrame()
         val text = frame?.let { ocr.readScreen(it) }.orEmpty()
@@ -2286,19 +2503,583 @@ class TaskPackDevViewModel(
         _state.update { it.copy(aiAutoClickCount = it.aiAutoClickCount + 1) }
         return TaskPackAiClickResult(
             accepted = true,
-            observation = "已在 ($x, $y) 点击一次（生成期推进界面，此坐标不会自动写进任务包）。" +
-                "点击后的游戏画面 OCR 文字：\n" + text.ifBlank { "（未识别到文字）" },
+            observation = buildString {
+                appendLine("已在 ($x, $y) 点击一次（坐标由系统换算与裁剪）。")
+                if (!hitText.isNullOrBlank()) appendLine("落点处的文字：$hitText")
+                appendLine("点击后的游戏画面 OCR 文字：")
+                appendLine(text.ifBlank { "（未识别到文字）" })
+            },
         )
+    }
+
+    /**
+     * 按文字点击：模型只说按钮文字，坐标由 App 的 OCR 定位。
+     *
+     * 这是「玩家不插手」的主路径 —— 模型不产生任何坐标，定位、点击、录制都在本机完成。
+     */
+    private suspend fun performAiTextClick(query: String): TaskPackAiClickResult {
+        val serviceReady = RemoteServiceManager.getInstanceOrNull() != null
+        if (!serviceReady) {
+            return TaskPackAiClickResult(
+                accepted = false,
+                observation = "点击失败：Shizuku 服务未连接，无法注入触摸。" +
+                    "请到「环境」页确认授权后重试。",
+            )
+        }
+        val frame = captureFrame() ?: return TaskPackAiClickResult(
+            accepted = false,
+            observation = "点击失败：无法截取当前画面，按文字定位需要截图。请改用 [[CLICK:x,y]] 或输出 task.json。",
+        )
+        val target = ocr.findTextCenter(frame, query)
+        frame.recycle()
+        if (target == null) {
+            return TaskPackAiClickResult(
+                accepted = false,
+                observation = "没有在画面上找到「$query」。请换用画面上真实存在的文字，或改用 [[CLICK:x,y]]。",
+            )
+        }
+        _state.update { it.copy(aiProvidedPoints = it.aiProvidedPoints + (target.x to target.y)) }
+        touchDown(target.x, target.y)
+        delay(60)
+        touchUp(target.x, target.y)
+        lastSelfActionAt = System.currentTimeMillis()
+        delay(900)
+        val after = captureFrame()
+        val text = after?.let { ocr.readScreen(it) }.orEmpty()
+        after?.recycle()
+        _state.update { it.copy(aiAutoClickCount = it.aiAutoClickCount + 1) }
+        return TaskPackAiClickResult(
+            accepted = true,
+            observation = "已点击文字「${target.text}」，坐标由系统 OCR 定位为 " +
+                "(${String.format(Locale.US, "%.4f", target.x)}, ${String.format(Locale.US, "%.4f", target.y)})。" +
+                "点击后的游戏画面 OCR 文字：\n" + text.ifBlank { "（未识别到文字）" },
+            x = target.x,
+            y = target.y,
+            text = target.text,
+        )
+    }
+
+    /**
+     * 边点边录：AI 每次点击成功后直接追加一条步骤。
+     *
+     * 识别到文字就写 tapText（运行时 OCR 定位，最稳），否则写 tap 并用 App 算出的坐标。
+     */
+    private suspend fun recordAiAction(action: TaskPackAiAction) {
+        val step = if (!action.text.isNullOrBlank()) {
+            PackStep(
+                op = "tapText",
+                text = action.text,
+                timeoutMs = 10_000,
+                note = "点击文字「${action.text}」（AI 边点边录）",
+            )
+        } else {
+            PackStep(
+                op = "tap",
+                x = action.x,
+                y = action.y,
+                durationMs = 80,
+                note = "点击坐标 (${coord(action.x)}, ${coord(action.y)})（AI 边点边录）",
+            )
+        }
+        mutateSteps { current ->
+            val next = current.steps + step
+            current.copy(steps = next, selectedStepIndex = next.lastIndex)
+        }
+        _state.update { it.copy(aiRecordedSteps = it.aiRecordedSteps + 1) }
     }
 
     /**
      * 打断正在进行的 AI 生成：取消协程，同时取消底层 OkHttp 请求，
      * 让长时间无响应的模型调用立即返回，而不是等到读超时。
      */
-    fun cancelAiGeneration() {
-        val job = aiJob ?: return
-        if (!job.isActive) return
+    // ==================== AI 对话记录 ====================
+
+    /** 追加一条对话记录；超过上限只丢最早的，正在等待回答的提问会被保住。 */
+    private fun chat(kind: AiChatKind, title: String, body: String, collapsible: Boolean = false) {
+        val keep = _state.value.aiChat.filter { it.kind == AiChatKind.ASK }.map { it.id }.toSet()
+        val message = AiChatMessage(
+            id = AiChat.nextId(),
+            kind = kind,
+            title = title,
+            body = body,
+            at = System.currentTimeMillis(),
+            collapsible = collapsible || kind == AiChatKind.THINKING,
+        )
+        _state.update { it.copy(aiChat = AiChat.append(it.aiChat, message, keep)) }
+    }
+
+    fun clearAiChat() = _state.update { it.copy(aiChat = emptyList()) }
+
+    /**
+     * 开新会话：清空对话与任务目标，回到「说一句话就开跑」的状态。
+     *
+     * 步骤和工程不动 —— 用户点「新会话」是想换个说法重写，不是把已有包删了。
+     */
+    fun startNewAiSession() {
+        if (_state.value.aiGenerating) cancelAiGeneration()
+        _state.update {
+            it.copy(
+                aiChat = emptyList(),
+                aiChatInput = "",
+                aiPrompt = "",
+                aiPendingPack = null,
+                aiUsageText = "",
+                aiStatus = "",
+                aiRecorded = emptyList(),
+                aiRecordedSteps = 0,
+                aiAutoClickCount = 0,
+            )
+        }
+    }
+
+    fun updateAiChatInput(value: String) = _state.update { it.copy(aiChatInput = value) }
+
+    /**
+     * 对话输入框的统一入口：
+     * - 正在等回答 → 当成回答，生成继续；
+     * - 正在生成 → 当成补充说明，下一轮随观察一起送达；
+     * - 空闲 → 追加到任务目标并立刻开始一轮生成（聊天式追加要求）。
+     */
+    fun sendAiChat() {
+        val text = _state.value.aiChatInput.trim()
+        if (text.isEmpty()) return
+        _state.update { it.copy(aiChatInput = "") }
+        if (_state.value.aiPendingQuestion != null) {
+            answerAiQuestion(text)
+            return
+        }
+        if (_state.value.aiGenerating) {
+            // 补充要求立刻生效：打断当前这轮，把它拼进任务目标后重新生成。
+            // 之前的思考、动作、对话记录都留在面板里，用户能看出「是按新的要求重来的」；
+            // 排队等本轮结束的做法看似温和，实际问题是要等半分钟以上，补充基本来不及用。
+            val base = _state.value.aiPrompt.trim()
+            val merged = if (base.isBlank()) text else "$base\n补充要求：$text"
+            _state.update { it.copy(aiPrompt = merged) }
+            chat(AiChatKind.USER, "补充要求（打断并重新生成）", text)
+            chat(
+                AiChatKind.SYSTEM,
+                "",
+                "已打断上一轮，按补充后的目标重新生成。",
+            )
+            cancelAiGeneration(quiet = true)
+            generateWithAi()
+            return
+        }
+        val base = _state.value.aiPrompt.trim()
+        val merged = if (base.isBlank()) text else "$base\n$text"
+        _state.update { it.copy(aiPrompt = merged) }
+        chat(AiChatKind.USER, "追加要求", text)
+        generateWithAi()
+    }
+
+    /** 回答模型的提问：生成协程会从挂起点继续。 */
+    fun answerAiQuestion(text: String) {
+        val deferred = questionDeferred ?: return
+        questionDeferred = null
+        _state.update { it.copy(aiPendingQuestion = null) }
+        deferred.complete(text.trim().ifBlank { null })
+    }
+
+    /** 不回答，让模型按最稳妥的默认继续。 */
+    fun skipAiQuestion() {
+        val deferred = questionDeferred ?: return
+        questionDeferred = null
+        _state.update { it.copy(aiPendingQuestion = null) }
+        deferred.complete(null)
+        chat(AiChatKind.SYSTEM, "已跳过提问", "AI 会按最稳妥的默认继续，不确定的步骤会标 optional 或做成配置项。")
+    }
+
+    /** 挂起等待用户回答；超时或被打断时返回 null，让模型自行决断。 */
+    private suspend fun awaitUserAnswer(question: String): String? {
+        val deferred = CompletableDeferred<String?>()
+        questionDeferred?.cancel()
+        questionDeferred = deferred
+        _state.update { it.copy(aiPendingQuestion = question) }
+        val answer = withTimeoutOrNull(ASK_TIMEOUT_MS) { deferred.await() }
+        if (questionDeferred === deferred) questionDeferred = null
+        _state.update { it.copy(aiPendingQuestion = null) }
+        return answer
+    }
+
+    // ==================== 主动观察：画面变化 / 用户手动点击 ====================
+
+    private fun pushObservation(text: String) {
+        if (text.isBlank()) return
+        synchronized(observationLock) {
+            if (observationQueue.size >= 24) observationQueue.removeFirst()
+            observationQueue.addLast(text)
+        }
+    }
+
+    /** 客户端每轮取一次，取完即清空。 */
+    private fun drainObservations(): List<String> = synchronized(observationLock) {
+        val out = observationQueue.toList()
+        observationQueue.clear()
+        out
+    }
+
+    fun setAiWatchScreen(enabled: Boolean) {
+        _state.update { it.copy(aiWatchScreen = enabled) }
+        aiPrefs.edit().putBoolean("watchScreen", enabled).apply()
+        if (!enabled) stopScreenWatch()
+    }
+
+    fun setAiAcceptUserGesture(enabled: Boolean) {
+        _state.update { it.copy(aiAcceptUserGesture = enabled) }
+        aiPrefs.edit().putBoolean("userGesture", enabled).apply()
+    }
+
+    /**
+     * 监视画面：画面明显变化时，把新画面的 OCR 文字主动推给模型。
+     *
+     * 模型看不见屏幕，只能靠文字。以前只有「生成开始」和「AI 自己点击后」两个时刻有画面快照，
+     * 游戏自己转场（过场动画结束、战斗结算弹出）时模型完全不知道，写出来的流程自然对不上。
+     */
+    private fun startScreenWatch() {
+        stopScreenWatch()
+        if (!_state.value.aiWatchScreen) return
+        watchJob = viewModelScope.launch(Dispatchers.IO) {
+            var lastHash = 0L
+            var lastText = ""
+            while (isActive) {
+                delay(SCREEN_WATCH_INTERVAL_MS)
+                if (!_state.value.aiGenerating) break
+                val frame = runCatching { frameSource.captureScaled(SCREEN_WATCH_WIDTH) }.getOrNull()
+                    ?: continue
+                val hash = runCatching { averageHash(frame) }.getOrDefault(0L)
+                val baseline = lastHash == 0L
+                val distance = if (baseline) 0 else java.lang.Long.bitCount(hash xor lastHash)
+                lastHash = hash
+                if (baseline || distance <= SCREEN_SAME_BITS) {
+                    frame.recycle()
+                    continue
+                }
+                // App 自己刚点过：这张新画面已经通过点击回传发给模型了，别再重复一遍。
+                if (System.currentTimeMillis() - lastSelfActionAt < SELF_ACTION_QUIET_MS) {
+                    frame.recycle()
+                    continue
+                }
+                val text = runCatching { ocr.readScreen(frame) }.getOrNull().orEmpty()
+                frame.recycle()
+                if (text.isBlank() || text == lastText) continue
+                lastText = text
+                _state.update { it.copy(aiScreenText = text, aiLiveObservation = text) }
+                pushObservation(
+                    "游戏画面刚刚发生了变化（不是 AI 点击造成的，可能是游戏自己转场或用户操作）。\n" +
+                        "当前画面 OCR 文字：\n$text\n请以这个新画面为准继续判断。",
+                )
+            }
+        }
+    }
+
+    private fun stopScreenWatch() {
+        watchJob?.cancel()
+        watchJob = null
+    }
+
+    /** 16×16 灰度均值哈希：只用来判断「画面变了没有」，不参与任何识别。 */
+    private fun averageHash(frame: Bitmap): Long {
+        val scaled = Bitmap.createScaledBitmap(frame, 16, 16, true)
+        var sum = 0L
+        val pixels = IntArray(256)
+        scaled.getPixels(pixels, 0, 16, 0, 0, 16, 16)
+        if (scaled !== frame) scaled.recycle()
+        for (p in pixels) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            sum += (r * 299 + g * 587 + b * 114) / 1000
+        }
+        val mean = sum / 256
+        var hash = 0L
+        for (i in 0 until 256) {
+            val p = pixels[i]
+            val luma = (((p shr 16) and 0xFF) * 299 + ((p shr 8) and 0xFF) * 587 + (p and 0xFF) * 114) / 1000
+            if (luma >= mean) hash = hash or (1L shl i)
+        }
+        return hash
+    }
+
+    /**
+     * 用户在 AI 生成期间自己点了游戏：把「点了哪里、那是什么文字、之后画面变成什么」告诉模型，
+     * 同时按开关决定要不要顺手记进录制序列。
+     */
+    fun onAiUserGesture(
+        frame: Bitmap?,
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        moved: Boolean,
+        durationMs: Long,
+        actionAt: Long,
+        track: List<Pair<Double, Double>>,
+    ) {
+        noteIdleTouch(startX, startY)
+        if (_state.value.aiRecording) {
+            recordAiGesture(
+                frame, startX, startY, endX, endY, moved, durationMs, actionAt, track,
+                source = AiRecordedAction.SOURCE_USER,
+            )
+            return
+        }
+        if (!_state.value.aiGenerating || !_state.value.aiAcceptUserGesture) {
+            frame?.recycle()
+            return
+        }
+        val x = normCoordinate(startX)
+        val y = normCoordinate(startY)
+        viewModelScope.launch(Dispatchers.IO) {
+            // 取词与模板匹配用「按下之前」的那一帧（画面还没被这次点击改变）；
+            // 点完之后的画面文字另抓一帧，两段都给模型，它才知道点下去发生了什么。
+            val before = frame ?: runCatching { frameSource.captureScaled(SILENT_THUMB_SOURCE) }.getOrNull()
+            val texts = before?.let { ocr.textsAt(it, x, y, limit = 3) }.orEmpty()
+            val templates = if (before != null && !moved) {
+                runCatching { iconMatcher.hits(before, x, y, texts, 2) }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            before?.recycle()
+            val after = runCatching { frameSource.captureScaled(SILENT_THUMB_SOURCE) }.getOrNull()
+            val afterText = after?.let { ocr.readScreen(it) }.orEmpty()
+            after?.recycle()
+            if (afterText.isNotBlank()) {
+                _state.update { it.copy(aiScreenText = afterText, aiLiveObservation = afterText) }
+            }
+            pushObservation(
+                buildString {
+                    appendLine("用户自己手动操作了游戏（不是 AI 发起的）：")
+                    appendLine("动作：${if (moved) "滑动/拖拽" else "点击"}，起点 (${coord(x)}, ${coord(y)})，时长 ${durationMs}ms")
+                    if (texts.isNotEmpty()) appendLine("该位置 OCR 候选：" + texts.joinToString(" ｜ "))
+                    if (templates.isNotEmpty()) {
+                        appendLine(
+                            "该位置模板候选：" + templates.joinToString(" ｜ ") {
+                                "${it.name}(${(it.score * 100).toInt()}%)"
+                            },
+                        )
+                    }
+                    appendLine("用户操作之后的画面 OCR 文字：")
+                    append(afterText.ifBlank { "（未识别到文字）" })
+                    appendLine()
+                    append("用户已经替你走了一步：这一步不要重复写进任务包，但它的效果要算进来。")
+                },
+            )
+            chat(
+                AiChatKind.ACTION,
+                "你手动点了游戏（已告诉 AI）",
+                "位置 (${coord(x)}, ${coord(y)})" +
+                    if (texts.isNotEmpty()) "，命中文字「${texts.first()}」" else "",
+            )
+        }
+    }
+
+    // ==================== AI 生成期间的静默录制 ====================
+
+    fun startAiRecording() {
+        val current = _state.value
+        if (current.recording) {
+            showMessage("请先停止当前录制，再开始 AI 录制")
+            return
+        }
+        if (current.aiGenerating) {
+            showMessage("生成中不能录制；先打断生成，录完再让 AI 完善")
+            return
+        }
+        _state.update { it.copy(aiRecording = true, aiRecorded = emptyList(), aiRecordBusy = 0) }
+        chat(
+            AiChatKind.SYSTEM,
+            "开始静默录制",
+            "点击、长按、滑动、摇杆都会被记下来，并附带当时的 OCR 文字候选与图标模板匹配结果；" +
+                "重复的动作也保留（只会标出来）。录制期间不影响你操作，录完点「让 AI 完善」即可。",
+        )
+    }
+
+    fun stopAiRecording() {
+        if (!_state.value.aiRecording) return
+        val count = _state.value.aiRecorded.size
+        _state.update { it.copy(aiRecording = false) }
+        chat(
+            AiChatKind.SYSTEM,
+            "静默录制结束 · $count 条动作",
+            if (count == 0) "没有录到动作。" else "点「让 AI 完善」把这 ${count} 条录制补成完整任务包；也可以直接生成步骤再手改。",
+        )
+    }
+
+    fun clearAiRecording() {
+        _state.update { it.copy(aiRecorded = emptyList(), aiRecordBusy = 0) }
+    }
+
+    /**
+     * 录一条手势（AI 录制模式）。与普通静默录制的区别：
+     * 完全不去重、不合并，全部保留，冲突只标记；后台补 OCR 多候选 + 模板候选 + 缩略图。
+     */
+    fun recordAiGesture(
+        frame: Bitmap?,
+        startX: Double,
+        startY: Double,
+        endX: Double,
+        endY: Double,
+        moved: Boolean,
+        durationMs: Long,
+        actionAt: Long,
+        track: List<Pair<Double, Double>>,
+        source: String = AiRecordedAction.SOURCE_USER,
+    ) {
+        if (!_state.value.aiRecording) {
+            frame?.recycle()
+            return
+        }
+        if (_state.value.aiRecorded.size >= AiRecording.MAX_ACTIONS) {
+            frame?.recycle()
+            return
+        }
+        val path = track.ifEmpty {
+            listOf(normCoordinate(startX) to normCoordinate(startY))
+        }
+        val gesture = SilentGestureAnalyzer.analyze(path, durationMs)
+        val duplicateOf = _state.value.aiRecorded.lastOrNull { prev ->
+            prev.op == gesture.op &&
+                kotlin.math.abs(prev.x - gesture.x) < SILENT_SAME_SPOT &&
+                kotlin.math.abs(prev.y - gesture.y) < SILENT_SAME_SPOT &&
+                (gesture.op != "swipe" ||
+                    (kotlin.math.abs(prev.toX - gesture.toX) < SILENT_SAME_SPOT &&
+                        kotlin.math.abs(prev.toY - gesture.toY) < SILENT_SAME_SPOT))
+        }?.seq
+        val seq = (_state.value.aiRecorded.maxOfOrNull { it.seq } ?: 0) + 1
+        val note = if (gesture.kind == SilentGestureAnalyzer.KIND_JOYSTICK) {
+            "摇杆：按住 ${durationMs}ms，推杆 ${(gesture.travel * 100).toInt()}%"
+        } else {
+            ""
+        }
+        val action = AiRecordedAction(
+            seq = seq,
+            op = gesture.op,
+            source = source,
+            x = gesture.x,
+            y = gesture.y,
+            toX = gesture.toX,
+            toY = gesture.toY,
+            durationMs = gesture.durationMs,
+            at = actionAt,
+            duplicateOf = duplicateOf,
+            note = note,
+        )
+        _state.update { it.copy(aiRecorded = it.aiRecorded + action, aiRecordBusy = it.aiRecordBusy + 1) }
+        chat(
+            AiChatKind.ACTION,
+            "录制 #$seq ${gesture.op}" + if (note.isNotBlank()) " · $note" else "",
+            "(${coord(gesture.x)}, ${coord(gesture.y)})" +
+                if (gesture.op == "swipe") " → (${coord(gesture.toX)}, ${coord(gesture.toY)})" else "" +
+                    "，${gesture.durationMs}ms",
+        )
+        // 后台补：OCR 多候选、图标模板候选、缩略图。失败就留空，不影响录制本身。
+        viewModelScope.launch(Dispatchers.IO) {
+            // 用按下之前的那一帧：这时候画面还是「按钮正在被点」的状态，取词才准。
+            val shot = frame ?: runCatching { frameSource.captureScaled(SILENT_THUMB_SOURCE) }.getOrNull()
+            val thumb = shot?.let {
+                runCatching {
+                    ByteArrayOutputStream().use { out ->
+                        it.compress(Bitmap.CompressFormat.JPEG, 72, out)
+                        out.toByteArray()
+                    }
+                }.getOrNull()
+            }
+            val texts = if (shot == null || gesture.op == "swipe") {
+                emptyList()
+            } else {
+                runCatching { ocr.textsAt(shot, gesture.x, gesture.y, limit = 3) }.getOrDefault(emptyList())
+            }
+            val templates: List<AiTemplateHit> = if (shot == null || gesture.op == "swipe") {
+                emptyList()
+            } else {
+                runCatching { iconMatcher.hits(shot, gesture.x, gesture.y, texts, 3) }
+                    .getOrDefault(emptyList())
+            }
+            shot?.recycle()
+            // 命中的图标注册进工程素材：这样后面写 tapTemplate 时路径一定合法。
+            templates.forEach { hit ->
+                _state.value.iconTemplates.firstOrNull { it.packPath == hit.path }?.let(::registerIconForAi)
+            }
+            _state.update { current ->
+                current.copy(
+                    aiRecorded = current.aiRecorded.map {
+                        if (it.seq == seq) it.copy(texts = texts, templates = templates, thumb = thumb) else it
+                    },
+                    aiRecordBusy = (current.aiRecordBusy - 1).coerceAtLeast(0),
+                )
+            }
+        }
+    }
+
+    /** 录制序列直接转成步骤（不经过 AI 时的兜底）。 */
+    fun applyAiRecordingAsSteps() {
+        val actions = _state.value.aiRecorded
+        if (actions.isEmpty()) {
+            showMessage("还没有录到动作")
+            return
+        }
+        val steps = AiRecording.toSteps(actions, _state.value.assets.keys)
+        mutateSteps { current ->
+            current.copy(steps = current.steps + steps, selectedStepIndex = current.steps.size)
+        }
+        chat(AiChatKind.SYSTEM, "已把 ${steps.size} 条录制转成步骤", "可以在右侧步骤列表继续微调。")
+        showMessage("已生成 ${steps.size} 条步骤")
+    }
+
+    /**
+     * 「录制完由 AI 完善」：把录制序列作为输入发给模型，让它补上等待、判断、循环等
+     * 录制阶段无法体现的部分，并把候选（OCR / 模板）整理成确定写法。
+     */
+    fun completeRecordingWithAi() {
+        val actions = _state.value.aiRecorded
+        if (actions.isEmpty()) {
+            showMessage("还没有录到动作，先录一段再让 AI 完善")
+            return
+        }
+        if (_state.value.aiRecordBusy > 0) {
+            showMessage("还在补 OCR / 模板匹配，稍等一两秒再点")
+            return
+        }
+        // 先把录制落成基础步骤：AI 在此基础上增删改，比让它凭空重写更贴近实际操作。
+        val steps = AiRecording.toSteps(actions, _state.value.assets.keys)
+        if (steps.isNotEmpty()) {
+            mutateSteps { current ->
+                current.copy(steps = current.steps + steps, selectedStepIndex = current.steps.size)
+            }
+        }
+        val timeline = AiRecording.timelineText(actions)
+        chat(
+            AiChatKind.USER,
+            "录制完成，交给 AI 完善（${actions.size} 条）",
+            timeline,
+            collapsible = true,
+        )
+        val instruction = buildString {
+            val base = _state.value.aiPrompt.trim()
+            if (base.isNotBlank()) {
+                appendLine(base)
+                appendLine()
+            }
+            appendLine("下面是玩家刚才的真实操作录制（已按顺序转成基础步骤放进当前任务包）：")
+            appendLine(timeline)
+            appendLine("请在这个基础上完善成完整任务包：")
+            appendLine("1. 每条录制都补上「先等待界面出现（waitText/waitTemplate）、再点击」的稳定写法；")
+            appendLine("2. OCR 候选有多个时，选真正的按钮文字，不要用旁边的标题或说明；")
+            appendLine("3. 模板候选比文字更稳时优先用 tapTemplate；引用前确认路径已在可用素材里；")
+            appendLine("4. 标了「与 #n 重复」的动作按业务判断要保留还是去掉；")
+            appendLine("5. 补上必要的循环、条件判断、返回与结束条件；参数用 params 声明。")
+            appendLine("不要臆造没有录制过的界面。")
+        }
+        startGeneration(instruction)
+    }
+
+    fun cancelAiGeneration(quiet: Boolean = false) {
+        val job = aiJob
+        if (job == null || !job.isActive) return
         aiClient.cancelActive()
+        questionDeferred?.cancel()
+        questionDeferred = null
+        stopScreenWatch()
         job.cancel()
         aiJob = null
         _state.update {
@@ -2306,15 +3087,23 @@ class TaskPackDevViewModel(
                 aiGenerating = false,
                 aiInterruptible = false,
                 aiPendingPack = null,
-                aiStatus = "已打断生成（本轮结果已丢弃，可修改任务目标后重新生成）",
+                aiPendingQuestion = null,
+                aiStatus = if (quiet) "" else "已打断生成（本轮结果已丢弃，可修改任务目标后重新生成）",
             )
         }
     }
 
-    fun generateWithAi() {
+    fun generateWithAi() = startGeneration(_state.value.aiPrompt)
+
+    /**
+     * 一轮生成的公共入口。
+     *
+     * [instruction] 可以是任务目标，也可以是「录制序列 + 完善要求」；其余流程完全一样。
+     */
+    private fun startGeneration(instruction: String) {
         val current = _state.value
         if (current.aiGenerating) return
-        if (current.aiPrompt.isBlank()) {
+        if (instruction.isBlank()) {
             showMessage("先写清任务目标、起点界面和结束条件")
             return
         }
@@ -2326,8 +3115,14 @@ class TaskPackDevViewModel(
         val basePack = currentPack()
         // 规范正文：模型打不开 URL，由 App 读取全文/缓存后注入对话。生成前先取好，不联网、不阻塞。
         val spec = specForGeneration(current.aiSpecInclude)
+        // 规范 33KB（约 15K tokens）每轮整份重发，是输入 token 的最大来源，也是前缀缓存
+        // 最难稳住的部分：这里压成「只依赖原文内容」的稳定摘录，同一份规范永远得到同一份文本，
+        // 服务端前缀缓存可以直接命中；摘录没覆盖的细节让模型用 [[NEED_SPEC:关键词]] 现取原文段落。
+        val specDigestText = TaskPackSpecDigest.digest(spec.text)
+        val useSpecDigest = specDigestText.length < spec.text.length
         // 模板库索引：整包模板 + 24 个步骤骨架 + 全部图标模板，注入对话供 AI 按需索取。
         val templateIndex = buildTemplateIndex(current)
+        synchronized(observationLock) { observationQueue.clear() }
         _state.update {
             it.copy(
                 aiGenerating = true,
@@ -2335,13 +3130,22 @@ class TaskPackDevViewModel(
                 aiPendingPack = null,
                 aiScreenshotsUsed = 0,
                 aiAutoClickCount = 0,
+                aiRecordedSteps = 0,
+                aiUsageText = "",
                 aiTemplateHits = 0,
+                aiAsksUsed = 0,
+                aiObservationsUsed = 0,
+                aiPendingQuestion = null,
                 aiSpecCharCount = spec.text.length,
                 aiSpecFromBuiltIn = spec.fromBuiltIn,
                 aiStatus = "正在识别当前画面文字…",
             )
         }
-        aiJob = viewModelScope.launch {
+        startScreenWatch()
+        // 用局部变量持有 job：打断后立刻重新生成时，旧协程的 finally 可能晚于新协程启动，
+        // 直接写 `aiJob = null` 会把新 job 的引用清掉，导致之后「打断」按不动。
+        var job: Job? = null
+        job = viewModelScope.launch {
             try {
                 // 默认上下文：抓当前帧做分块 OCR。AI 未索取画面时，只有这些文字进入对话。
                 val frame = captureFrame()
@@ -2352,13 +3156,15 @@ class TaskPackDevViewModel(
                 }
                 val outcome = aiClient.generate(
                     config = TaskPackAiConfig(current.aiBaseUrl, current.aiApiKey, current.aiModel),
-                    instruction = current.aiPrompt,
+                    instruction = instruction,
                     basePack = basePack,
                     // 动态取最新素材：AI 索取图标模板时素材会注册进工程，校验要看到它们。
                     availableAssets = { _state.value.assets.keys },
                     appVersionCode = BuildConfig.VERSION_CODE,
                     screenText = screenText,
-                    specText = spec.text,
+                    specText = if (useSpecDigest) specDigestText else spec.text,
+                    specDigest = useSpecDigest,
+                    specProvider = { query -> TaskPackSpecDigest.search(spec.text, query) },
                     specSourceNote = spec.status,
                     allowScreenshot = current.aiAllowScreenshot,
                     // 只有 AI 主动索取标记时才会调用这里，抓取并压缩当前帧发给模型。
@@ -2367,12 +3173,27 @@ class TaskPackDevViewModel(
                     allowAutoClick = current.aiAutoClick,
                     knownCoordinates = knownCoordinateText(),
                     clickHandler = ::performAiClick,
+                    // 按文字点击：模型只说按钮文字，坐标由本机 OCR 给出（推荐路径）。
+                    textClickHandler = ::performAiTextClick,
+                    // 边点边录：点中就把这次动作写进任务包，玩家不用另外再录一遍。
+                    onActionRecorded = if (current.aiAutoRecord) ::recordAiAction else null,
                     // 模板库：索引 + 按需检索（命中图标会自动注册素材，保证校验与导出都带上）。
                     templateIndex = if (current.aiTemplateLookup) templateIndex else "",
                     templateProvider = if (current.aiTemplateLookup) {
                         { query -> lookupTemplates(query) }
                     } else null,
                     onStatus = { status -> _state.update { it.copy(aiStatus = status) } },
+                    // 画面变化 / 用户手动点击：每轮请求前补给模型。
+                    observations = ::drainObservations,
+                    // 模型提问：挂起等用户回答（面板上会出现输入框）。
+                    askHandler = ::awaitUserAnswer,
+                    onChat = { message ->
+                        val keep = _state.value.aiChat
+                            .filter { it.kind == AiChatKind.ASK }
+                            .map { it.id }
+                            .toSet()
+                        _state.update { it.copy(aiChat = AiChat.append(it.aiChat, message, keep)) }
+                    },
                 )
                 // 已打断：底层请求被 cancel 可能返回 IOException，不能让错误结果覆盖「已打断」状态。
                 if (!isActive || outcome.interrupted) {
@@ -2380,9 +3201,12 @@ class TaskPackDevViewModel(
                         it.copy(
                             aiGenerating = false, aiInterruptible = false, aiPendingPack = null,
                             aiTemplateHits = outcome.templateHits,
+                            aiAsksUsed = outcome.asksUsed,
+                            aiObservationsUsed = outcome.observationsUsed,
                             aiStatus = "已打断生成（本轮结果已丢弃）",
                         )
                     }
+                    chat(AiChatKind.ERROR, "已打断生成", "本轮结果已丢弃，可修改要求后重新生成。")
                     return@launch
                 }
                 val pack = outcome.pack
@@ -2390,16 +3214,6 @@ class TaskPackDevViewModel(
                     "；未附带规范文档（已关闭）"
                 } else {
                     "；已随请求附带规范 ${spec.text.length} 字${if (spec.fromBuiltIn) "（内置）" else "（链接）"}"
-                }
-                if (outcome.interrupted) {
-                    _state.update {
-                        it.copy(
-                            aiGenerating = false, aiInterruptible = false, aiPendingPack = null,
-                            aiTemplateHits = outcome.templateHits,
-                            aiStatus = "已打断生成（本轮结果已丢弃）",
-                        )
-                    }
-                    return@launch
                 }
                 _state.update {
                     it.copy(
@@ -2409,6 +3223,9 @@ class TaskPackDevViewModel(
                         aiPendingAttempts = outcome.attempts,
                         aiScreenshotsUsed = outcome.screenshotsUsed,
                         aiTemplateHits = outcome.templateHits,
+                        aiAsksUsed = outcome.asksUsed,
+                        aiObservationsUsed = outcome.observationsUsed,
+                        aiUsageText = outcome.usage.summary(),
                         aiStatus = if (pack == null) {
                             (outcome.error ?: "生成失败") + specNote
                         } else {
@@ -2418,7 +3235,12 @@ class TaskPackDevViewModel(
                                 "；全程仅用 OCR 文字"
                             }
                             val clicks = if (outcome.clicksUsed > 0) {
-                                "；AI 自动点击了 ${outcome.clicksUsed} 次（仅推进界面）"
+                                val rec = if (current.aiAutoRecord) {
+                                    "，已自动录成 ${outcome.clicksUsed} 条步骤"
+                                } else {
+                                    "（仅推进界面未录制）"
+                                }
+                                "；AI 自动点击了 ${outcome.clicksUsed} 次$rec"
                             } else ""
                             val tpl = if (outcome.templateHits > 0) {
                                 "；从模板库索取了 ${outcome.templateHits} 次"
@@ -2427,20 +3249,46 @@ class TaskPackDevViewModel(
                         },
                     )
                 }
+                if (pack == null) {
+                    chat(
+                        AiChatKind.ERROR,
+                        "生成失败",
+                        (outcome.error ?: "未知错误") + specNote,
+                    )
+                } else {
+                    chat(
+                        AiChatKind.SYSTEM,
+                        "生成完成，待你确认",
+                        buildString {
+                            appendLine("步骤 ${basePack.steps.size} → ${pack.steps.size}，配置项 ${basePack.params.size} → ${pack.params.size}")
+                            appendLine("第 ${outcome.attempts} 轮通过原版校验$specNote")
+                            if (outcome.asksUsed > 0) appendLine("向你提问 ${outcome.asksUsed} 次")
+                            if (outcome.observationsUsed > 0) appendLine("主动同步画面/操作 ${outcome.observationsUsed} 次")
+                            append("在下方卡片里点「应用并继续编辑」才会覆盖当前工程。")
+                        },
+                    )
+                }
             } catch (e: CancellationException) {
                 // 打断：状态已由 cancelAiGeneration 更新，这里不再覆盖。
                 throw e
             } finally {
-                aiJob = null
-                _state.update { it.copy(aiInterruptible = false) }
+                if (aiJob === job) {
+                    aiJob = null
+                    stopScreenWatch()
+                    _state.update { it.copy(aiInterruptible = false, aiPendingQuestion = null) }
+                }
             }
         }
+        aiJob = job
     }
 
     /** 模板库索引摘要：让模型知道有哪些整包、步骤骨架与图标分类可索取。 */
     private fun buildTemplateIndex(state: TaskPackDevState): String = buildString {
-        appendLine("整包模板 ${state.packTemplates.size} 个（可直接参考其流程写法）：")
-        state.packTemplates.take(12).forEach {
+        // 固定按 id 排序：模板加载顺序在不同设备 / 不同时间可能不同，
+        // 顺序一抖，system 前缀就整段失效，服务端缓存再也命不中。
+        val packs = state.packTemplates.sortedBy { it.id }
+        appendLine("整包模板 ${packs.size} 个（可直接参考其流程写法）：")
+        packs.take(12).forEach {
             appendLine("  ${it.id}｜${it.name}｜${it.stepCount} 步｜${it.description.take(60)}")
         }
         appendLine("步骤模板：${TaskPackTemplateLibrary.STEP_TEMPLATES.joinToString("、") { it.op }}")
@@ -2541,6 +3389,21 @@ class TaskPackDevViewModel(
     companion object {
         private const val LONG_PRESS_MS = 550L
         private val CLICK_TEXT = Regex("点击文字「([^」]+)」")
+
+        /** 模型提问等多久算超时（超时按「用户不想回答」处理，让模型自行决断）。 */
+        private const val ASK_TIMEOUT_MS = 10 * 60 * 1000L
+
+        /** 画面监视的轮询间隔：越短越及时，但每次都要截帧 + 算哈希。 */
+        private const val SCREEN_WATCH_INTERVAL_MS = 1500L
+
+        /** 监视用的截图宽度：给哈希和分块 OCR 都够用，又不至于太慢。 */
+        private const val SCREEN_WATCH_WIDTH = 960
+
+        /** 汉明距离小于等于这个值就算「同一画面」（16×16 哈希，抖动一般 0~8 位）。 */
+        private const val SCREEN_SAME_BITS = 10
+
+        /** App 自己点完后的静默窗口：这段内的画面变化已由点击回传，不再重复上报。 */
+        private const val SELF_ACTION_QUIET_MS = 2500L
     }
 }
 

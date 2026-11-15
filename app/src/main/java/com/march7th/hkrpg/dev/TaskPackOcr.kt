@@ -90,6 +90,53 @@ class TaskPackOcr(
     data class RegionText(val lines: List<String>, val text: String)
 
     /**
+     * 点击位置上的**多个**文字候选。
+     *
+     * 录制一条点击时不能只留一个词：同一个按钮上常叠着「开始挑战」和它的副标题，
+     * 旁边还有面板标题；只留第一个很容易留错，后面要么点不到、要么点到标题上。
+     * 这里把「框住点击点」的优先、离得近的其次，全部返回，交给模型/开发者判断。
+     */
+    suspend fun textsAt(
+        frame: Bitmap,
+        normalizedX: Double,
+        normalizedY: Double,
+        limit: Int = 3,
+    ): List<String> = withContext(Dispatchers.IO) {
+        if (!ensureReady()) return@withContext emptyList()
+        runCatching {
+            val mat = ImageUtils.bitmapToMat(frame)
+            try {
+                val px = (normalizedX * frame.width).roundToInt().coerceIn(0, frame.width - 1)
+                val py = (normalizedY * frame.height).roundToInt().coerceIn(0, frame.height - 1)
+                val padding = max(14, (frame.width * 0.015).roundToInt())
+                val maxDist = min(frame.width, frame.height) * 0.18
+                val roi = centeredRoi(px, py, frame.width, frame.height, 900, 600)
+                OcrEngine.run(mat, roi)
+                    .asSequence()
+                    .filter { it.score >= 0.25f && it.normalized().isNotBlank() }
+                    .map { r ->
+                        val cx = r.x + (r.w / 2.0)
+                        val cy = r.y + (r.h / 2.0)
+                        val inside = px >= r.x - padding && px <= r.x + r.w + padding &&
+                            py >= r.y - padding && py <= r.y + r.h + padding
+                        Triple(r.normalized(), inside, hypot(cx - px, cy - py))
+                    }
+                    .filter { (_, inside, distance) -> inside || distance <= maxDist }
+                    .sortedWith(
+                        compareByDescending<Triple<String, Boolean, Double>> { it.second }
+                            .thenBy { it.third }
+                    )
+                    .map { it.first }
+                    .distinct()
+                    .take(limit)
+                    .toList()
+            } finally {
+                mat.release()
+            }
+        }.onFailure { Timber.w(it, "task-pack textsAt failed") }.getOrDefault(emptyList())
+    }
+
+    /**
      * 只识别用户框选的 region（归一化 [x,y,w,h]）里的文字，供「拉框 OCR 文字」使用。
      *
      * 与 [readScreen] 一样分块，但块只覆盖 ROI 且最长边 ≤900，避免整帧缩小把小字抹掉；
@@ -163,6 +210,60 @@ class TaskPackOcr(
             }
         }.onFailure { Timber.w(it, "task-pack readScreen failed") }.getOrDefault("")
     }
+
+    /**
+     * 按文字定位点击点：给一段按钮文字，返回它在画面里的归一化中心。
+     *
+     * 这是「坐标由软件提供」的核心：AI 只说点哪个文字，坐标由这里算出来，
+     * 模型输入里不出现任何点位，也就不存在「猜坐标」的问题。
+     *
+     * 匹配优先级：完全相等 → 包含该文字 → 该文字包含识别结果（模型多写了后缀时）。
+     * 同级里取面积最小的框，避免命中整块面板的标题。
+     */
+    suspend fun findTextCenter(frame: Bitmap, query: String): TextTarget? =
+        withContext(Dispatchers.IO) {
+            if (!ensureReady()) return@withContext null
+            val q = normalizeQuery(query)
+            if (q.length < 1) return@withContext null
+            runCatching {
+                val mat = ImageUtils.bitmapToMat(frame)
+                try {
+                    val results = mutableListOf<OcrEngine.OcrResult>()
+                    for (tile in tiles(frame.width, frame.height)) {
+                        results += OcrEngine.run(mat, tile)
+                    }
+                    val candidates = results
+                        .filter { it.score >= 0.3f && it.normalized().isNotBlank() }
+                        .map { it to it.normalized() }
+                    val best = candidates.filter { it.second == q }
+                        .minByOrNull { it.first.w.toLong() * it.first.h }
+                        ?: candidates.filter { it.second.contains(q) }
+                            .minByOrNull { it.first.w.toLong() * it.first.h }
+                        ?: candidates.filter { it.second.length >= 2 && q.contains(it.second) }
+                            .maxByOrNull { it.second.length }
+                        ?: return@runCatching null
+                    val r = best.first
+                    TextTarget(
+                        x = (r.x + r.w / 2.0) / frame.width,
+                        y = (r.y + r.h / 2.0) / frame.height,
+                        text = r.text.trim(),
+                    )
+                } finally {
+                    mat.release()
+                }
+            }.onFailure { Timber.w(it, "task-pack findTextCenter failed") }.getOrNull()
+        }
+
+    /** 按钮文字归一化：去掉空格、引号、书名号与常见占位后缀，方便与 OCR 结果对齐。 */
+    private fun normalizeQuery(raw: String): String = raw
+        .replace(Regex("[\\s\u3000]+"), "")
+        .replace(Regex("[\"'“”‘’「」『』《》<>\\[\\]()（）]"), "")
+        .removeSuffix("按钮")
+        .removeSuffix("的文字")
+        .trim()
+
+    /** 按文字点击的命中结果。 */
+    data class TextTarget(val x: Double, val y: Double, val text: String)
 
     /** 环境页/AI 页自检：把 OCR 是否就绪、各路识别条数直接摆出来，方便排查「识别不到」。 */
     suspend fun diagnose(frame: Bitmap): String = withContext(Dispatchers.IO) {

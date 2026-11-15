@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
@@ -51,7 +52,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -107,6 +110,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.window.Dialog
@@ -119,6 +123,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
@@ -132,8 +137,12 @@ import androidx.navigation.NavController
 import com.march7th.hkrpg.data.model.PackParam
 import com.march7th.hkrpg.data.model.PackStep
 import com.march7th.hkrpg.data.resource.CustomTaskPackValidator.KNOWN_OPS
+import com.march7th.hkrpg.dev.AiChatKind
+import com.march7th.hkrpg.dev.AiChatMessage
+import com.march7th.hkrpg.constant.Routes
 import com.march7th.hkrpg.dev.DelayField
 import com.march7th.hkrpg.dev.PackTemplateEntry
+import com.march7th.hkrpg.dev.SilentGestureAnalyzer
 import com.march7th.hkrpg.dev.StepTemplate
 import com.march7th.hkrpg.dev.TaskPackDisplay
 import com.march7th.hkrpg.dev.TaskPackTemplateLibrary
@@ -349,8 +358,13 @@ fun TaskPackDeveloperScreen(
                     state = state,
                     tab = tab,
                     onTabChange = { index ->
-                        tab = index
-                        if (index != 0) splitMode = true
+                        // AI 写包是竖屏独立页：切过去直接导航，不再占用这里的横屏布局。
+                        if (index == 2) {
+                            navController.navigate(Routes.TASK_PACK_AI)
+                        } else {
+                            tab = index
+                            if (index != 0) splitMode = true
+                        }
                     },
                 )
             } else {
@@ -375,9 +389,16 @@ fun TaskPackDeveloperScreen(
                                 viewModel = viewModel,
                                 state = state,
                                 tab = tab,
-                                onTabChange = { tab = it },
+                                onTabChange = { index ->
+                                    if (index == 2) {
+                                        navController.navigate(Routes.TASK_PACK_AI)
+                                    } else {
+                                        tab = index
+                                    }
+                                },
                                 onImport = { importLauncher.launch(arrayOf("*/*")) },
                                 onExport = { exportLauncher.launch(viewModel.suggestedFileName()) },
+                                onOpenAi = { navController.navigate(Routes.TASK_PACK_AI) },
                                 modifier = Modifier.weight(0.42f).fillMaxHeight(),
                             )
                         }
@@ -393,9 +414,16 @@ fun TaskPackDeveloperScreen(
                                 viewModel = viewModel,
                                 state = state,
                                 tab = tab,
-                                onTabChange = { tab = it },
+                                onTabChange = { index ->
+                                    if (index == 2) {
+                                        navController.navigate(Routes.TASK_PACK_AI)
+                                    } else {
+                                        tab = index
+                                    }
+                                },
                                 onImport = { importLauncher.launch(arrayOf("*/*")) },
                                 onExport = { exportLauncher.launch(viewModel.suggestedFileName()) },
+                                onOpenAi = { navController.navigate(Routes.TASK_PACK_AI) },
                                 modifier = Modifier.weight(1f).fillMaxWidth(),
                             )
                         }
@@ -876,6 +904,7 @@ private fun WorkPane(
     onTabChange: (Int) -> Unit,
     onImport: () -> Unit,
     onExport: () -> Unit,
+    onOpenAi: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
@@ -906,7 +935,7 @@ private fun WorkPane(
                         }
                     },
                 )
-                2 -> AiTab(viewModel, state)
+                2 -> AiEntryCard(onOpenAi)
                 3 -> ExportTab(viewModel, state, onExport)
                 4 -> EnvironmentTab(viewModel, state)
                 5 -> TemplateTab(viewModel, state)
@@ -995,7 +1024,7 @@ private fun RecorderTab(viewModel: TaskPackDevViewModel, state: TaskPackDevState
 }
 
 @Composable
-private fun LiveRecorderView(
+internal fun LiveRecorderView(
     viewModel: TaskPackDevViewModel,
     state: TaskPackDevState,
     modifier: Modifier,
@@ -1011,6 +1040,9 @@ private fun LiveRecorderView(
     val idleTouchNow by rememberUpdatedState(state.idleTouchEnabled)
     // 静默模式不在这里截帧：截图交给 ViewModel 的后台协程，手势链不等待，游玩不卡。
     val silentNow by rememberUpdatedState(state.mode == DevRecordMode.SILENT)
+    // AI 生成中 / AI 静默录制中：这两种状态下也要接手势，并把动作交给 AI。
+    val aiGenNow by rememberUpdatedState(state.aiGenerating)
+    val aiRecordNow by rememberUpdatedState(state.aiRecording)
     val gestureEvents = remember { Channel<DevGestureEvent>(Channel.UNLIMITED) }
 
     // 画面基准固定 1920×1080（16:9）：虚拟屏与 SurfaceView 缓冲同尺寸，
@@ -1035,14 +1067,21 @@ private fun LiveRecorderView(
                 is DevGestureEvent.Down -> {
                     frame?.recycle()
                     frame = null
-                    // 非录制态（含 AI 生成中）也注入真实触摸，只是不截图、不写步骤。
-                    active = recordingNow || idleTouchNow
+                    // 非录制态（含 AI 生成中 / AI 录制中）也注入真实触摸，只是不写普通步骤。
+                    active = recordingNow || aiGenNow || aiRecordNow || idleTouchNow
                     if (active) {
-                        if (recordingNow && !silentNow) {
-                            frame = viewModel.captureFrame()
-                        } else if (!recordingNow) {
-                            // 用户手动点过的坐标登记为「用户提供的坐标」，供 AI 自动点击引用。
-                            viewModel.noteIdleTouch(event.x, event.y)
+                        when {
+                            recordingNow && !silentNow -> frame = viewModel.captureFrame()
+                            aiGenNow || aiRecordNow -> {
+                                // 这一帧是「按下之前」的画面：取词与模板匹配都要用它，
+                                // 点完之后的画面文字另抓一帧，两段一起交给 AI。
+                                frame = viewModel.captureFrame()
+                                viewModel.noteIdleTouch(event.x, event.y)
+                            }
+                            else -> {
+                                // 用户手动点过的坐标登记为「用户提供的坐标」，供 AI 自动点击引用。
+                                viewModel.noteIdleTouch(event.x, event.y)
+                            }
                         }
                         startX = event.x
                         startY = event.y
@@ -1056,8 +1095,8 @@ private fun LiveRecorderView(
                     frame = null
                     if (active) {
                         viewModel.touchUp(event.x, event.y)
-                        if (recordingNow) {
-                            viewModel.recordGesture(
+                        when {
+                            aiRecordNow -> viewModel.recordAiGesture(
                                 frame = captured,
                                 startX = startX,
                                 startY = startY,
@@ -1066,9 +1105,34 @@ private fun LiveRecorderView(
                                 moved = event.moved,
                                 durationMs = event.durationMs,
                                 actionAt = actionAt,
+                                track = event.track,
                             )
-                        } else {
-                            captured?.recycle()
+
+                            recordingNow -> viewModel.recordGesture(
+                                frame = captured,
+                                startX = startX,
+                                startY = startY,
+                                endX = event.x,
+                                endY = event.y,
+                                moved = event.moved,
+                                durationMs = event.durationMs,
+                                actionAt = actionAt,
+                                track = event.track,
+                            )
+
+                            aiGenNow -> viewModel.onAiUserGesture(
+                                frame = captured,
+                                startX = startX,
+                                startY = startY,
+                                endX = event.x,
+                                endY = event.y,
+                                moved = event.moved,
+                                durationMs = event.durationMs,
+                                actionAt = actionAt,
+                                track = event.track,
+                            )
+
+                            else -> captured?.recycle()
                         }
                     } else {
                         captured?.recycle()
@@ -1183,17 +1247,23 @@ private fun LiveRecorderView(
         } else if ((state.recording && state.mode in setOf(
                 DevRecordMode.GESTURE, DevRecordMode.SWIPE, DevRecordMode.AUTO,
                 DevRecordMode.SILENT,
-            )) || (!state.recording && state.idleTouchEnabled)
+            )) || state.aiRecording || (!state.recording && state.idleTouchEnabled)
         ) {
-            // 录制态：截图 + 注入 + 写步骤；非录制态（含 AI 生成中）：只注入、不写步骤。
+            // 录制态：截图 + 注入 + 写步骤；非录制态（含 AI 生成中 / AI 录制中）：只注入，不写普通步骤。
             Box(
                 modifier = Modifier.fillMaxSize()
-                    .pointerInput(state.recording, state.idleTouchEnabled) {
+                    .pointerInput(state.recording, state.idleTouchEnabled, state.aiRecording, state.aiGenerating) {
                     awaitEachGesture {
                         val down = awaitFirstDown()
                         val start = down.position
                         val injectedAt = SystemClock.uptimeMillis()
                         val actionAt = System.currentTimeMillis()
+                        // 轨迹采样：摇杆「推出去又收回」在抬起点上完全看不出来，
+                        // 只有记住走过的点才能认出它。按 3px 抽稀、最多 96 点，
+                        // 一次手势的开销可以忽略，不影响游玩手感。
+                        val track = ArrayList<Pair<Double, Double>>(64)
+                        track += start.normX(size) to start.normY(size)
+                        var lastSample = start
                         gestureEvents.trySend(
                             DevGestureEvent.Down(start.normX(size), start.normY(size), actionAt)
                         )
@@ -1213,6 +1283,12 @@ private fun LiveRecorderView(
                                 if (change.pressed) {
                                     if (change.positionChanged()) {
                                         distance = maxOf(distance, (change.position - start).getDistance())
+                                        if (track.size < 96 &&
+                                            (change.position - lastSample).getDistance() >= 3f
+                                        ) {
+                                            track += change.position.normX(size) to change.position.normY(size)
+                                            lastSample = change.position
+                                        }
                                         gestureEvents.trySend(
                                             DevGestureEvent.Move(
                                                 change.position.normX(size), change.position.normY(size),
@@ -1223,12 +1299,18 @@ private fun LiveRecorderView(
                                 } else {
                                     change.consume()
                                     completed = true
+                                    track += change.position.normX(size) to change.position.normY(size)
+                                    // 判定「算不算滑动」用相对画面的比例：固定 24px 在
+                                    // 小屏上等于半个按钮，会把小幅滑动误判成点击。
+                                    val moveThreshold =
+                                        (minOf(size.width, size.height) * 0.010f).coerceAtLeast(10f)
                                     gestureEvents.trySend(
                                         DevGestureEvent.Up(
                                             x = change.position.normX(size),
                                             y = change.position.normY(size),
-                                            moved = distance >= 24f,
+                                            moved = distance >= moveThreshold,
                                             durationMs = SystemClock.uptimeMillis() - injectedAt,
+                                            track = track,
                                         )
                                     )
                                 }
@@ -1337,7 +1419,7 @@ private fun LiveRecorderView(
                 .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
                 .padding(horizontal = 6.dp, vertical = 3.dp),
         )
-        if (!state.recording) {
+        if (!state.recording && !state.aiRecording) {
             Column(
                 modifier = Modifier.align(Alignment.Center)
                     .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
@@ -1411,6 +1493,8 @@ private sealed interface DevGestureEvent {
         val y: Double,
         val moved: Boolean,
         val durationMs: Long,
+        /** 归一化触摸轨迹（按下 → 抬起）：静默录制靠它区分摇杆与滑动。 */
+        val track: List<Pair<Double, Double>> = emptyList(),
     ) : DevGestureEvent
     data object Cancel : DevGestureEvent
 }
@@ -2816,278 +2900,410 @@ private fun SpecSection(viewModel: TaskPackDevViewModel, state: TaskPackDevState
     }
 }
 
+/** 开发者页里的 AI 入口：真正的写包界面是竖屏独立页，这里只负责跳过去。 */
 @Composable
-private fun AiTab(viewModel: TaskPackDevViewModel, state: TaskPackDevState) {
+private fun AiEntryCard(onOpenAi: () -> Unit) {
     Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
+        modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("AI 全自动写任务包", style = MaterialTheme.typography.titleLarge)
+        Text("AI 写任务包", style = MaterialTheme.typography.titleMedium)
         Text(
-            "支持 OpenAI 兼容的 Chat Completions 服务。生成时会把《任务文件开发规范》全文发给 AI，避免写出不符合规范的包；" +
-                "默认只把当前画面的 OCR 文字交给 AI，AI 主动索取时才发截图或检索内置模板库；" +
-                "生成期间 AI 可自动点击游戏画面推进多层界面，你也可以随时点「打断生成」中止。" +
-                "结果按原版规则校验，失败最多回喂修正三轮。",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            "顶栏可切「专注画面 / 分栏编辑」对照实时画面；画面控制条可切「等比完整 / 等比铺满」。",
+            "写包是聊天式的，用竖屏更顺手：独立页面里上方是游戏画面，下面是对话。" +
+                "步骤、工程和这里共用，来回切不会丢。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        OutlinedTextField(
-            value = state.aiBaseUrl,
-            onValueChange = viewModel::updateAiBaseUrl,
-            label = { Text("API 地址 / Base URL") },
-            placeholder = { Text("https://api.openai.com/v1") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = state.aiApiKey,
-            onValueChange = viewModel::updateAiApiKey,
-            label = { Text("API Key") },
-            visualTransformation = PasswordVisualTransformation(),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = state.aiModel,
-            onValueChange = viewModel::updateAiModel,
-            label = { Text("模型名") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        Button(onClick = onOpenAi) { Text("打开 AI 写包页面") }
         Text(
-            "Key 只保存在本应用私有配置中，不写进任务包；AI 只在开发者工具进程联网，生成的任务包本身仍无网络能力。",
+            "也可以直接点左侧功能栏的「AI 生成」，会跳到同一页。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 空会话时的引导：三句话点一下就能开跑。 */
+@Composable
+internal fun AiWelcome(viewModel: TaskPackDevViewModel) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("说清楚要做什么，我来写任务包", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "生成时我可以自己点游戏、自己看画面上的文字，坐标不用你给。" +
+                "你也可以先静默录一遍操作，我再照着补等待、判断和循环。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        // 画面策略开关：默认只给 OCR 文字，允许 AI 主动索取截图。
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("允许 AI 主动索取游戏画面", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    if (state.aiAllowScreenshot) {
-                        "开启：AI 需要时才发截图；关闭：始终只发 OCR 文字，纯文本模型也能用"
-                    } else {
-                        "关闭：无论 AI 是否索取，都只提供 OCR 文字，不发任何图片"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = state.aiAllowScreenshot,
-                onCheckedChange = viewModel::updateAiAllowScreenshot,
-            )
-        }
-        // AI 边生成边自动点击：默认开启，模型可按画面自行决定坐标推进界面（不写进任务包）。
-        Card {
-            Column(
-                modifier = Modifier.padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("AI 生成时自动点击游戏画面", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "开启后 AI 写多层流程时会主动请求点击（点进下一层、开菜单、确认弹窗），" +
-                                "系统真实点击游戏并把新画面的 OCR 文字回给它，最多 8 次。" +
-                                "点击坐标由模型依据画面自行判断，只用于推进界面、**不会写进任务包**；" +
-                                "包内坐标仍只能来自你录制或明确提供。生成期间你自己也可以直接点画面。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = state.aiAutoClick,
-                        onCheckedChange = viewModel::setAiAutoClick,
-                    )
-                }
-                Text(
-                    "本轮自动点击 ${state.aiAutoClickCount} 次 · 用户提供的坐标 ${state.aiProvidedPoints.size} 个",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = viewModel::clearAiProvidedPoints) { Text("清空手动提供的坐标") }
-                Card(
-                    colors = androidx.compose.material3.CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    ),
-                ) {
-                    Column(Modifier.padding(8.dp)) {
-                        Text(
-                            "用户提供的坐标清单（可写进任务包）",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                        Text(
-                            viewModel.knownCoordinateText(),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            modifier = Modifier.heightIn(max = 140.dp)
-                                .verticalScroll(rememberScrollState()),
-                        )
-                    }
-                }
-            }
-        }
-        // AI 从模板库按需索取：注入索引，模型输出标记后 App 检索并回喂确切路径。
-        Card {
-            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("允许 AI 从模板库找需要的", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "开启后会把整包模板、24 个步骤骨架和 ${state.iconTemplates.size} 个图标模板的索引发给 AI；" +
-                                "AI 需要时输出标记索取，App 检索后回喂确切 assets 路径与字段写法，" +
-                                "命中的图标会自动加入当前工程并随包导出。图标全部来自仓库现有素材。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = state.aiTemplateLookup,
-                        onCheckedChange = viewModel::setAiTemplateLookup,
-                    )
-                }
-                Text(
-                    "本轮索取模板 ${state.aiTemplateHits} 次",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        // 任务包开发规范：让 AI 真正「读到」规范正文（内置全文 + 可添加规范链接）
-        SpecSection(viewModel, state)
-        HorizontalDivider()
-        OutlinedTextField(
-            value = state.aiPrompt,
-            onValueChange = viewModel::updateAiPrompt,
-            label = { Text("任务目标") },
-            placeholder = { Text("例如：从大厅进入邮件，点全部领取，确认后返回大厅。写清起点和结束条件。") },
-            minLines = 5,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                onClick = viewModel::captureAiScreenText,
-                enabled = !state.aiReadingScreen,
-                modifier = Modifier.weight(1f),
-            ) {
-                Text(if (state.aiReadingScreen) "识别中…" else "刷新画面文字")
-            }
-            OutlinedButton(
-                onClick = viewModel::runOcrDiagnosis,
-                modifier = Modifier.weight(1f),
-            ) {
-                Text("OCR 自检")
-            }
-        }
-        if (state.ocrDiagnosis.isNotBlank()) {
-            Card {
-                Text(
-                    state.ocrDiagnosis,
-                    modifier = Modifier.padding(10.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-        if (state.aiScreenText.isNotBlank()) {
-            Card {
-                Column(modifier = Modifier.padding(10.dp)) {
-                    Text(
-                        "将作为默认上下文发给 AI 的画面文字：",
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                    Text(
-                        state.aiScreenText,
-                        modifier = Modifier.heightIn(max = 160.dp)
-                            .verticalScroll(rememberScrollState()),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = viewModel::generateWithAi,
-                enabled = !state.aiGenerating,
-                modifier = Modifier.weight(1f),
-            ) {
-                if (state.aiGenerating) {
-                    CircularProgressIndicator(modifier = Modifier.height(20.dp).width(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(if (state.aiGenerating) "正在生成与校验…" else "生成 / 改写完整任务包")
-            }
-            if (state.aiGenerating) {
-                OutlinedButton(
-                    onClick = viewModel::cancelAiGeneration,
-                    enabled = state.aiInterruptible,
-                ) { Text("打断生成") }
-            } else {
-                OutlinedButton(onClick = viewModel::cancelAiGeneration, enabled = false) {
-                    Text("打断生成")
-                }
-            }
-        }
-        if (state.aiGenerating) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            Text(
-                "生成中可随时点「打断生成」立即停止（会取消正在进行的模型请求），本轮结果将丢弃。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (state.aiStatus.isNotBlank()) {
-            Text(state.aiStatus, style = MaterialTheme.typography.bodyMedium)
-        }
-        if (!state.aiGenerating && state.aiStatus.contains("通过原版校验")) {
-            Text(
-                if (state.aiScreenshotsUsed > 0) {
-                    "本轮 AI 主动索取并发送了 ${state.aiScreenshotsUsed} 张游戏画面"
-                } else {
-                    "本轮 AI 未索取画面，全程仅依据 OCR 文字生成"
+        listOf(
+            "从大厅进入邮件，点全部领取，确认后返回大厅",
+            "每日实训：领取任务奖励，把 3 个任务做完再回大厅",
+            "跑 3 次历战余响，次数做成配置项让我自己填",
+        ).forEach { sample ->
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().clickable {
+                    viewModel.updateAiChatInput(sample)
+                    viewModel.sendAiChat()
                 },
+            ) {
+                Text(
+                    sample,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+/** 聊天气泡：用户靠右，模型正文靠左无底框，思考过程默认折叠，动作/提问/错误各自成卡片。 */
+@Composable
+internal fun AiChatBubble(message: AiChatMessage) {
+    var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
+    when (message.kind) {
+        AiChatKind.USER -> Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = RoundedCornerShape(
+                    topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 6.dp,
+                ),
+                modifier = Modifier.widthIn(max = 560.dp),
+            ) {
+                Text(
+                    message.body,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+
+        AiChatKind.SYSTEM -> Text(
+            message.body,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        AiChatKind.THINKING -> Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "思考过程",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        if (expanded) "收起" else "展开（${message.body.length} 字）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { expanded = !expanded },
+                    )
+                }
+                Text(
+                    if (expanded || message.body.length <= 200) {
+                        message.body
+                    } else {
+                        message.body.take(200) + "…"
+                    },
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        AiChatKind.ACTION -> Row(modifier = Modifier.fillMaxWidth()) {
+            Box(
+                Modifier
+                    .padding(top = 6.dp)
+                    .size(6.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+            )
+            Spacer(Modifier.width(8.dp))
+            Column {
+                if (message.title.isNotBlank()) {
+                    Text(
+                        message.title,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                if (message.body.isNotBlank()) {
+                    Text(
+                        message.body,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        AiChatKind.ASK -> Surface(
+            color = MaterialTheme.colorScheme.tertiaryContainer,
+            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    message.title.ifBlank { "AI 想确认一件事" },
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Text(message.body, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "在下面回答，生成会接着走",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+
+        AiChatKind.ERROR -> Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (message.title.isNotBlank()) {
+                    Text(message.title, style = MaterialTheme.typography.labelMedium)
+                }
+                Text(message.body, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        else -> Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                message.title.ifBlank { "AI" },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            val tooLong = message.body.length > 240
+            Text(
+                if (expanded || !tooLong) message.body else message.body.take(240) + "…",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (tooLong) {
+                Text(
+                    if (expanded) "收起" else "展开全文",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { expanded = !expanded },
+                )
+            }
+        }
+    }
+}
+
+/** 生成结果待确认卡片：步骤/配置项差异 + JSON 预览 + 应用/放弃。 */
+@Composable
+internal fun AiPendingResultCard(
+    viewModel: TaskPackDevViewModel,
+    state: TaskPackDevState,
+    pending: com.march7th.hkrpg.data.model.CustomTaskPack,
+) {
+    val beforeOps = state.steps.groupingBy { it.op }.eachCount()
+    val afterOps = pending.steps.groupingBy { it.op }.eachCount()
+    val beforeParams = state.params.mapTo(LinkedHashSet()) { it.key }
+    val afterParams = pending.params.mapTo(LinkedHashSet()) { it.key }
+    var showJson by rememberSaveable { mutableStateOf(false) }
+    Card {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("生成结果待确认（还没有覆盖当前工程）", fontWeight = FontWeight.Bold)
+            Text(
+                "步骤 ${state.steps.size} → ${pending.steps.size}；配置项 ${state.params.size} → ${pending.params.size}；" +
+                    "第 ${state.aiPendingAttempts} 轮通过原版校验",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            val added = afterParams - beforeParams
+            if (added.isNotEmpty()) {
+                Text(
+                    "新增配置项：" + added.joinToString("、"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            (beforeOps.keys + afterOps.keys).sorted().forEach { op ->
+                val before = beforeOps[op] ?: 0
+                val after = afterOps[op] ?: 0
+                if (before != after) Text("$op：$before → $after", style = MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                if (showJson) "收起 task.json" else "查看 task.json",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable { showJson = !showJson },
+            )
+            if (showJson) {
+                SelectionContainer {
+                    Text(
+                        viewModel.pendingAiJson(),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        modifier = Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState()),
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { viewModel.applyPendingAi() }) { Text("应用并继续编辑") }
+                OutlinedButton(onClick = { viewModel.discardPendingAi() }) { Text("放弃") }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun AiSettingsPanel(viewModel: TaskPackDevViewModel, state: TaskPackDevState) {
+    Text("接口（OpenAI 兼容 Chat Completions）", style = MaterialTheme.typography.titleSmall)
+    OutlinedTextField(
+        value = state.aiBaseUrl,
+        onValueChange = viewModel::updateAiBaseUrl,
+        label = { Text("API 地址 / Base URL") },
+        placeholder = { Text("https://api.openai.com/v1") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = state.aiApiKey,
+        onValueChange = viewModel::updateAiApiKey,
+        label = { Text("API Key") },
+        visualTransformation = PasswordVisualTransformation(),
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = state.aiModel,
+        onValueChange = viewModel::updateAiModel,
+        label = { Text("模型名") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(
+        "Key 只保存在本应用私有配置中，不写进任务包；生成的任务包本身仍无网络能力。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    AiSwitchRow(
+        title = "允许 AI 主动索取游戏画面",
+        subtitle = "关闭后只提供 OCR 文字，纯文本模型也能用",
+        checked = state.aiAllowScreenshot,
+        onChange = viewModel::updateAiAllowScreenshot,
+    )
+    AiSwitchRow(
+        title = "画面变化时主动把新 OCR 推给 AI",
+        subtitle = "游戏自己转场（结算、过场结束）时模型也能跟上；每次变化只报一次",
+        checked = state.aiWatchScreen,
+        onChange = viewModel::setAiWatchScreen,
+    )
+    AiSwitchRow(
+        title = "你自己点游戏时告诉 AI",
+        subtitle = "点到了什么文字、点完画面变成什么，都会补进对话；AI 不会重复写这一步",
+        checked = state.aiAcceptUserGesture,
+        onChange = viewModel::setAiAcceptUserGesture,
+    )
+    AiSwitchRow(
+        title = "AI 自动点击并录制（玩家不用插手）",
+        subtitle = "AI 说点哪个文字，坐标由本机 OCR 定位；点中即录成步骤。最多 24 次",
+        checked = state.aiAutoClick,
+        onChange = viewModel::setAiAutoClick,
+    )
+    AiSwitchRow(
+        title = "把 AI 的点击直接录成步骤（边点边录）",
+        subtitle = "关闭后点击只推进界面，步骤完全由 AI 在 task.json 里写",
+        checked = state.aiAutoRecord,
+        onChange = viewModel::setAiAutoRecord,
+    )
+    AiSwitchRow(
+        title = "允许 AI 从模板库找需要的",
+        subtitle = "整包模板 + 24 个步骤骨架 + ${state.iconTemplates.size} 个图标模板，命中图标自动注册进工程",
+        checked = state.aiTemplateLookup,
+        onChange = viewModel::setAiTemplateLookup,
+    )
+    if (state.aiUsageText.isNotBlank()) {
+        Text("Token 用量：${state.aiUsageText}", style = MaterialTheme.typography.labelSmall)
+    }
+    if (state.aiRecordedSteps > 0 || state.aiAutoClickCount > 0) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "本轮自动点击 ${state.aiAutoClickCount} 次 · 录成步骤 ${state.aiRecordedSteps} 条",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.weight(1f),
+            )
+            if (state.aiRecordedSteps > 0) {
+                TextButton(onClick = viewModel::clearAiRecordedSteps) { Text("撤销录制的步骤") }
+            }
+        }
+    }
+    SpecSection(viewModel, state)
+    HorizontalDivider()
+    OutlinedTextField(
+        value = state.aiPrompt,
+        onValueChange = viewModel::updateAiPrompt,
+        label = { Text("任务目标") },
+        placeholder = { Text("例如：从大厅进入邮件，点全部领取，确认后返回大厅。写清起点和结束条件。") },
+        minLines = 4,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = viewModel::captureAiScreenText,
+            enabled = !state.aiReadingScreen,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(if (state.aiReadingScreen) "识别中…" else "刷新画面文字")
+        }
+        OutlinedButton(onClick = viewModel::runOcrDiagnosis, modifier = Modifier.weight(1f)) {
+            Text("OCR 自检")
+        }
+    }
+    if (state.ocrDiagnosis.isNotBlank()) {
+        Card {
+            Text(state.ocrDiagnosis, modifier = Modifier.padding(10.dp), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (state.aiScreenText.isNotBlank()) {
+        Card {
+            Column(modifier = Modifier.padding(10.dp)) {
+                Text("最近一次画面文字：", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    state.aiScreenText,
+                    modifier = Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState()),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+    Text(
+        "约束：AI 不得新增 op 或字段；坐标由本机归一化、裁剪并按 OCR 吸附；图标只能来自模板库索取到的真实路径。",
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+@Composable
+private fun AiSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        state.aiPendingPack?.let { pending ->
-            val beforeOps = state.steps.groupingBy { it.op }.eachCount()
-            val afterOps = pending.steps.groupingBy { it.op }.eachCount()
-            Card {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("生成结果待确认（未覆盖当前工程）", fontWeight = FontWeight.Bold)
-                    Text("步骤：${state.steps.size} → ${pending.steps.size}；第 ${state.aiPendingAttempts} 轮通过原版校验")
-                    Text("id=${pending.id} · version=${pending.version} · author=${pending.author}")
-                    (beforeOps.keys + afterOps.keys).sorted().forEach { op ->
-                        val before = beforeOps[op] ?: 0
-                        val after = afterOps[op] ?: 0
-                        if (before != after) Text("$op：$before → $after", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Text(
-                        "生成结果 task.json（只读预览）",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                    SelectionContainer {
-                        Text(
-                            viewModel.pendingAiJson(),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            modifier = Modifier.heightIn(max = 220.dp).verticalScroll(rememberScrollState()),
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = viewModel::applyPendingAi) { Text("应用并继续编辑") }
-                        OutlinedButton(onClick = viewModel::discardPendingAi) { Text("放弃") }
-                    }
-                }
-            }
-        }
-        Text(
-            "约束：AI 不得新增 op 或字段；包内坐标只来自用户录制或明确提供，图标只能来自模板库索取到的真实路径。没有坐标时优先 tapText / waitText。",
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
@@ -3136,6 +3352,13 @@ private fun SilentReviewDialog(viewModel: TaskPackDevViewModel, state: TaskPackD
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Text(
+                        "摇杆按「按住时长 + 推杆方向」记成一条 swipe（时长就是按住多久）；" +
+                            "滑动终点取轨迹里最远的那一点，所以抬起前回拉不会带偏方向。" +
+                            "连续同向滑动默认合并成一条，滑得更远。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     if (conflicts.isNotEmpty()) {
                         Text(
                             "有 ${conflicts.size} 条与已有步骤重复（标「重复」），已自动取消勾选；" +
@@ -3152,6 +3375,18 @@ private fun SilentReviewDialog(viewModel: TaskPackDevViewModel, state: TaskPackD
                             "已选 $picked / ${actions.size}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = state.silentMergeSwipes,
+                            onCheckedChange = viewModel::setSilentMergeSwipes,
+                            modifier = Modifier.size(30.dp),
+                        )
+                        Text(
+                            "合并连续同向滑动（一次滑不完补第二下时合成一条）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     LazyColumn(
@@ -3246,6 +3481,20 @@ private fun SilentActionRow(
                                 .padding(horizontal = 4.dp, vertical = 1.dp),
                         )
                     }
+                    if (action.kind == SilentGestureAnalyzer.KIND_JOYSTICK) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "摇杆",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .background(
+                                    MaterialTheme.colorScheme.primaryContainer,
+                                    RoundedCornerShape(4.dp),
+                                )
+                                .padding(horizontal = 4.dp, vertical = 1.dp),
+                        )
+                    }
                     Spacer(Modifier.width(6.dp))
                     Box {
                         TextButton(
@@ -3271,7 +3520,12 @@ private fun SilentActionRow(
                 Text(
                     if (action.op == "swipe") {
                         "(${action.x.coordText()}, ${action.y.coordText()}) → " +
-                            "(${action.toX.coordText()}, ${action.toY.coordText()}) · ${action.durationMs}ms"
+                            "(${action.toX.coordText()}, ${action.toY.coordText()}) · ${action.durationMs}ms" +
+                            if (action.kind == SilentGestureAnalyzer.KIND_JOYSTICK) {
+                                " · 按住 ${action.durationMs}ms，推杆 ${(action.travel * 100).toInt()}%"
+                            } else {
+                                ""
+                            }
                     } else {
                         "(${action.x.coordText()}, ${action.y.coordText()}) · ${action.durationMs}ms"
                     },
@@ -3337,6 +3591,11 @@ private fun ProjectDialog(
                     "每个工程单独存成 .m7atask（步骤 + 配置项 + 素材），切换前会自动保存，" +
                         "所以可以同时写多个包来回改。",
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "工程目录：${viewModel.projectDirectory()}",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (state.projects.isEmpty()) {
@@ -3896,6 +4155,17 @@ private fun ExportTab(
                     errors.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
                 }
             }
+            OutlinedButton(onClick = viewModel::repairIssues, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Build, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("一键修复语法与取值问题")
+            }
+            Text(
+                "只修能确定意图的写法：表达式里的 {变量} 去掉花括号、越界数值收回区间、" +
+                    "compare / color 同义写法。不会改文字内容、坐标点与模板引用；修完仍不通过的会继续列在上面。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         Button(onClick = onExport, enabled = !state.exporting, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Filled.Add, contentDescription = null)
